@@ -36,18 +36,24 @@ curl http://127.0.0.1:8080/
 With PostgreSQL running and `DATABASE_URL` set in `.env`:
 
 ```bash
-# Install CLI once (optional)
-cargo install sea-orm-cli
-
-# From project root, run migrations
-sea-orm-cli migrate run -u $env:DATABASE_URL
+cargo run --bin migrate
 ```
 
-On Windows PowerShell, use:
+This runs the built-in migrate binary (reads `DATABASE_URL` from `.env`). Alternative: install and use SeaORM CLI:
 
-```powershell
-$env:DATABASE_URL = "postgres://user:password@localhost:5432/bitpool"
+```bash
+cargo install sea-orm-cli
 sea-orm-cli migrate run
 ```
 
-Or run migrations from code at startup (see migration crate `Migrator::up()`).
+(Set `DATABASE_URL` in the environment if not using `.env`.)
+
+## 4. PostgreSQL with Docker Compose
+
+From project root:
+
+```bash
+docker compose up -d postgres
+```
+
+Uses `postgres:latest`, port 5432. Default user/db/password: `bitpool` / `bitpool` / `bitpool`. Override with `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT` in `.env` or environment. Data is stored in volume `postgres_data`. Set `DATABASE_URL=postgres://bitpool:bitpool@localhost:5432/bitpool` in `.env`, then run `cargo run --bin migrate`.
