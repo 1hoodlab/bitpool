@@ -12,8 +12,11 @@ use serde::Deserialize;
 use serde_json::json;
 
 use adapter::postgres_event_repository::{connect_postgres, SeaOrmEventRepository};
+use adapter::postgres_node_loader::load_miner_nodes_from_db;
 use domain::entities::{MessageKind, NodeSendCommand};
-use engine::mining_engine::{start_deterministic_engine, EngineHandle};
+use engine::mining_engine::{
+    start_deterministic_engine_with_config, EngineHandle, MinerNodeProfile, MiningNetworkConfig,
+};
 
 struct AppState {
     engine: EngineHandle,
@@ -96,6 +99,35 @@ async fn main() -> std::io::Result<()> {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(1_024);
+    let mining_network_enabled = std::env::var("MINING_NETWORK_ENABLED")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .or_else(|| {
+            std::env::var("PHASE2_ENABLED")
+                .ok()
+                .and_then(|v| v.parse::<bool>().ok())
+        })
+        .unwrap_or(true);
+    let tx_spawn_chance_per_thousand = std::env::var("TX_SPAWN_CHANCE_PER_THOUSAND")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(120);
+    let max_block_weight = std::env::var("MAX_BLOCK_WEIGHT")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(4_000);
+    let pow_target_block_time_ms = std::env::var("POW_TARGET_BLOCK_TIME_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(15_000);
+    let propagation_base_delay_ms = std::env::var("PROPAGATION_BASE_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(10);
+    let propagation_jitter_ms = std::env::var("PROPAGATION_JITTER_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(40);
 
     let db = connect_postgres(&database_url).await.map_err(|e| {
         std::io::Error::new(
@@ -104,11 +136,38 @@ async fn main() -> std::io::Result<()> {
         )
     })?;
     let event_repo = Arc::new(SeaOrmEventRepository { db });
-    let engine = start_deterministic_engine(
+    let miner_nodes = load_miner_nodes_from_db(&event_repo.db)
+        .await
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("failed to load nodes from database: {e}"),
+            )
+        })?
+        .into_iter()
+        .map(|node| MinerNodeProfile {
+            node_id: node.node_id,
+            hash_rate: node.hash_rate,
+            is_online: node.is_online,
+            has_relay: node.has_relay,
+        })
+        .collect::<Vec<_>>();
+    let network_config = MiningNetworkConfig {
+        enabled: mining_network_enabled,
+        tx_spawn_chance_per_thousand,
+        max_block_weight,
+        target_block_time_ms: pow_target_block_time_ms,
+        propagation_base_delay_ms,
+        propagation_jitter_ms,
+        miner_nodes,
+    };
+
+    let engine = start_deterministic_engine_with_config(
         event_repo,
         tick_interval_ms,
         base_seed,
         max_inbox_drain_per_tick,
+        network_config,
     )
     .await
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
