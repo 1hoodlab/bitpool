@@ -394,6 +394,7 @@ dependencies = [
  "async-trait",
  "dotenvy",
  "env_logger",
+ "log",
  "migration",
  "sea-orm",
  "serde",
