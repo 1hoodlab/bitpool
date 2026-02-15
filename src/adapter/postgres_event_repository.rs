@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 
 use crate::database::entities::{EventLogInsert, EventLogRow};
-use crate::domain::entities::EventEnvelope;
+use crate::domain::entities::{Block, BlockHeader, BlockIndexEntry, BlockStatus, ChainTip, EventEnvelope};
 use crate::domain::repositories::{DomainRepoError, EventRepository};
 
 pub async fn connect_postgres(database_url: &str) -> Result<DatabaseConnection, sea_orm::DbErr> {
@@ -107,6 +107,204 @@ impl EventRepository for SeaOrmEventRepository {
         );
 
         self.read_events_with_statement(stmt).await
+    }
+
+    async fn upsert_block(
+        &self,
+        block: &Block,
+        cumulative_work: u128,
+        first_seen_seq_id: i64,
+        chain_status: &str,
+    ) -> Result<(), DomainRepoError> {
+        let cumulative_work_i64 = cumulative_work.min(i64::MAX as u128) as i64;
+        let work_i64 = (block.header.difficulty as u128).min(i64::MAX as u128) as i64;
+        let nonce_visual = block.header.nonce.to_string();
+        let target = block.header.difficulty.to_string();
+        let parent_id = if block.header.parent_hash.is_empty() || block.header.parent_hash == "genesis"
+        {
+            None
+        } else {
+            Some(block.header.parent_hash.clone())
+        };
+
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO blocks (
+                block_id,
+                parent_id,
+                height,
+                found_time_ms,
+                target,
+                total_weight,
+                fees_sats,
+                work,
+                cumulative_work,
+                miner_node_id,
+                first_seen_seq_id,
+                chain_status,
+                nonce_visual,
+                subsidy_sats
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (block_id)
+            DO UPDATE SET
+                parent_id = EXCLUDED.parent_id,
+                height = EXCLUDED.height,
+                found_time_ms = EXCLUDED.found_time_ms,
+                target = EXCLUDED.target,
+                total_weight = EXCLUDED.total_weight,
+                fees_sats = EXCLUDED.fees_sats,
+                work = EXCLUDED.work,
+                cumulative_work = EXCLUDED.cumulative_work,
+                miner_node_id = EXCLUDED.miner_node_id,
+                first_seen_seq_id = LEAST(blocks.first_seen_seq_id, EXCLUDED.first_seen_seq_id),
+                chain_status = EXCLUDED.chain_status,
+                nonce_visual = EXCLUDED.nonce_visual
+            "#
+            .to_string(),
+            vec![
+                block.header.block_id.clone().into(),
+                parent_id.into(),
+                block.header.height.into(),
+                block.header.timestamp_ms.into(),
+                target.into(),
+                (block.header.total_weight as i64).into(),
+                block.header.total_fees_sats.into(),
+                work_i64.into(),
+                cumulative_work_i64.into(),
+                block.header.miner_node_id.clone().into(),
+                first_seen_seq_id.into(),
+                chain_status.to_string().into(),
+                nonce_visual.into(),
+                0i64.into(),
+            ],
+        );
+
+        self.db
+            .execute(stmt)
+            .await
+            .map_err(|e| DomainRepoError(format!("upsert block failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn load_chain_state(&self) -> Result<(Vec<BlockIndexEntry>, Option<ChainTip>), DomainRepoError> {
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            r#"
+            SELECT
+                block_id,
+                parent_id,
+                height,
+                found_time_ms,
+                target,
+                total_weight,
+                fees_sats,
+                cumulative_work,
+                miner_node_id,
+                chain_status,
+                nonce_visual
+            FROM blocks
+            ORDER BY height ASC, found_time_ms ASC, block_id ASC
+            "#
+            .to_string(),
+        );
+        let rows = self
+            .db
+            .query_all(stmt)
+            .await
+            .map_err(|e| DomainRepoError(format!("load chain state failed: {e}")))?;
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            let block_id: String = row
+                .try_get("", "block_id")
+                .map_err(|e| DomainRepoError(format!("parse block_id failed: {e}")))?;
+            let parent_id: Option<String> = row
+                .try_get("", "parent_id")
+                .map_err(|e| DomainRepoError(format!("parse parent_id failed: {e}")))?;
+            let height: i64 = row
+                .try_get("", "height")
+                .map_err(|e| DomainRepoError(format!("parse height failed: {e}")))?;
+            let found_time_ms: i64 = row
+                .try_get("", "found_time_ms")
+                .map_err(|e| DomainRepoError(format!("parse found_time_ms failed: {e}")))?;
+            let target: String = row
+                .try_get("", "target")
+                .map_err(|e| DomainRepoError(format!("parse target failed: {e}")))?;
+            let total_weight_i32: i32 = row
+                .try_get("", "total_weight")
+                .map_err(|e| DomainRepoError(format!("parse total_weight failed: {e}")))?;
+            let fees_sats: i64 = row
+                .try_get("", "fees_sats")
+                .map_err(|e| DomainRepoError(format!("parse fees_sats failed: {e}")))?;
+            let cumulative_work_i64: i64 = row
+                .try_get("", "cumulative_work")
+                .map_err(|e| DomainRepoError(format!("parse cumulative_work failed: {e}")))?;
+            let miner_node_id: String = row
+                .try_get("", "miner_node_id")
+                .map_err(|e| DomainRepoError(format!("parse miner_node_id failed: {e}")))?;
+            let chain_status_raw: String = row
+                .try_get("", "chain_status")
+                .map_err(|e| DomainRepoError(format!("parse chain_status failed: {e}")))?;
+            let nonce_visual: Option<String> = row
+                .try_get("", "nonce_visual")
+                .map_err(|e| DomainRepoError(format!("parse nonce_visual failed: {e}")))?;
+
+            let difficulty = target.parse::<u64>().unwrap_or(1);
+            let nonce = nonce_visual
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let status = match chain_status_raw.as_str() {
+                "active" => BlockStatus::Active,
+                "orphan" => BlockStatus::Orphan,
+                "invalid" => BlockStatus::Invalid,
+                _ => BlockStatus::Valid,
+            };
+
+            entries.push(BlockIndexEntry {
+                header: BlockHeader {
+                    block_id,
+                    height,
+                    parent_hash: parent_id.unwrap_or_else(|| "genesis".to_string()),
+                    miner_node_id,
+                    timestamp_ms: found_time_ms,
+                    difficulty,
+                    nonce,
+                    total_weight: total_weight_i32,
+                    total_fees_sats: fees_sats,
+                },
+                tx_ids: Vec::new(),
+                cumulative_work: cumulative_work_i64.max(0) as u128,
+                status,
+            });
+        }
+
+        let tip_entry = entries
+            .iter()
+            .filter(|e| matches!(e.status, BlockStatus::Active))
+            .max_by(|a, b| {
+                a.cumulative_work
+                    .cmp(&b.cumulative_work)
+                    .then_with(|| a.header.height.cmp(&b.header.height))
+                    .then_with(|| a.header.block_id.cmp(&b.header.block_id))
+            })
+            .or_else(|| {
+                entries.iter().max_by(|a, b| {
+                    a.cumulative_work
+                        .cmp(&b.cumulative_work)
+                        .then_with(|| a.header.height.cmp(&b.header.height))
+                        .then_with(|| a.header.block_id.cmp(&b.header.block_id))
+                })
+            });
+
+        let tip = tip_entry.map(|entry| ChainTip {
+            block_id: entry.header.block_id.clone(),
+            height: entry.header.height,
+            cumulative_work: entry.cumulative_work,
+        });
+
+        Ok((entries, tip))
     }
 }
 

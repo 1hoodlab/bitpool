@@ -5,10 +5,12 @@ mod engine;
 mod helper;
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
 use env_logger::Env;
-use serde::Deserialize;
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use adapter::postgres_event_repository::{connect_postgres, SeaOrmEventRepository};
@@ -20,6 +22,7 @@ use engine::mining_engine::{
 
 struct AppState {
     engine: EngineHandle,
+    repo: Arc<SeaOrmEventRepository>,
 }
 
 #[get("/health")]
@@ -40,6 +43,23 @@ struct SendCommandRequest {
     kind: String,
     payload: serde_json::Value,
     latency_override_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpsertNodeRequest {
+    node_id: String,
+    hash_rate: u64,
+    is_online: Option<bool>,
+    has_relay: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct UpsertNodeResponse {
+    node_id: String,
+    hash_rate: u64,
+    is_online: bool,
+    has_relay: bool,
+    hot_applied: bool,
 }
 
 async fn send_command(
@@ -71,10 +91,78 @@ async fn send_command(
     }
 }
 
+async fn upsert_node(
+    state: web::Data<AppState>,
+    body: web::Json<UpsertNodeRequest>,
+) -> impl Responder {
+    if body.node_id.trim().is_empty() {
+        return HttpResponse::BadRequest().json(json!({
+            "error": "node_id is required"
+        }));
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let is_online = body.is_online.unwrap_or(true);
+    let has_relay = body.has_relay.unwrap_or(false);
+    let hash_rate_i64 = body.hash_rate.min(i64::MAX as u64) as i64;
+
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        INSERT INTO nodes (node_id, hash_rate, is_online, has_relay, updated_at_ms, created_at_ms)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (node_id)
+        DO UPDATE SET
+            hash_rate = EXCLUDED.hash_rate,
+            is_online = EXCLUDED.is_online,
+            has_relay = EXCLUDED.has_relay,
+            updated_at_ms = EXCLUDED.updated_at_ms
+        "#
+        .to_string(),
+        vec![
+            body.node_id.clone().into(),
+            hash_rate_i64.into(),
+            is_online.into(),
+            has_relay.into(),
+            now_ms.into(),
+            now_ms.into(),
+        ],
+    );
+
+    if let Err(e) = state.repo.db.execute(stmt).await {
+        return HttpResponse::InternalServerError().json(json!({
+            "error": format!("failed to upsert node in database: {e}")
+        }));
+    }
+
+    let profile = MinerNodeProfile {
+        node_id: body.node_id.clone(),
+        hash_rate: body.hash_rate,
+        is_online,
+        has_relay,
+    };
+    if let Err(e) = state.engine.upsert_miner_node(profile) {
+        return HttpResponse::InternalServerError().json(json!({
+            "error": format!("failed to apply node into engine runtime: {e}")
+        }));
+    }
+
+    HttpResponse::Created().json(UpsertNodeResponse {
+        node_id: body.node_id.clone(),
+        hash_rate: body.hash_rate,
+        is_online,
+        has_relay,
+        hot_applied: true,
+    })
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info,sqlx::query=off")).init();
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PORT")
@@ -163,7 +251,7 @@ async fn main() -> std::io::Result<()> {
     };
 
     let engine = start_deterministic_engine_with_config(
-        event_repo,
+        Arc::clone(&event_repo),
         tick_interval_ms,
         base_seed,
         max_inbox_drain_per_tick,
@@ -171,7 +259,10 @@ async fn main() -> std::io::Result<()> {
     )
     .await
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    let app_state = web::Data::new(AppState { engine });
+    let app_state = web::Data::new(AppState {
+        engine,
+        repo: Arc::clone(&event_repo),
+    });
 
     HttpServer::new(move || {
         App::new()
@@ -179,6 +270,7 @@ async fn main() -> std::io::Result<()> {
             .service(health)
             .service(engine_status)
             .route("/engine/send", web::post().to(send_command))
+            .route("/nodes", web::post().to(upsert_node))
     })
         .bind((host.as_str(), port))?
         .run()

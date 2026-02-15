@@ -49,20 +49,32 @@ impl Default for EngineStatus {
 }
 
 pub struct EngineHandle {
-    command_tx: mpsc::UnboundedSender<NodeSendCommand>,
+    command_tx: mpsc::UnboundedSender<EngineCommand>,
     status: Arc<RwLock<EngineStatus>>,
 }
 
 impl EngineHandle {
     pub fn enqueue_send(&self, cmd: NodeSendCommand) -> Result<(), DomainRepoError> {
         self.command_tx
-            .send(cmd)
+            .send(EngineCommand::Send(cmd))
+            .map_err(|e| DomainRepoError(format!("engine inbox closed: {e}")))
+    }
+
+    pub fn upsert_miner_node(&self, node: MinerNodeProfile) -> Result<(), DomainRepoError> {
+        self.command_tx
+            .send(EngineCommand::UpsertMinerNode(node))
             .map_err(|e| DomainRepoError(format!("engine inbox closed: {e}")))
     }
 
     pub async fn status(&self) -> EngineStatus {
         self.status.read().await.clone()
     }
+}
+
+#[derive(Debug, Clone)]
+enum EngineCommand {
+    Send(NodeSendCommand),
+    UpsertMinerNode(MinerNodeProfile),
 }
 
 #[derive(Debug, Clone)]
@@ -133,7 +145,7 @@ pub async fn start_deterministic_engine_with_config<R: EventRepository + 'static
     network_config: MiningNetworkConfig,
 ) -> Result<EngineHandle, DomainRepoError> {
     let initial_seq_id = repo.last_seq_id().await?.unwrap_or(0);
-    let (command_tx, command_rx) = mpsc::unbounded_channel::<NodeSendCommand>();
+    let (command_tx, command_rx) = mpsc::unbounded_channel::<EngineCommand>();
     let status = Arc::new(RwLock::new(EngineStatus {
         running: true,
         current_seq_id: initial_seq_id,
@@ -179,7 +191,7 @@ pub async fn start_deterministic_engine_with_config<R: EventRepository + 'static
         rewards: HashMap::new(),
     };
     core.initialize_network();
-    core.initialize_genesis(); // Phase 3: Initialize Genesis Block
+    core.bootstrap_from_repo().await?;
 
     tokio::spawn(async move {
         let mut ticker = time::interval(Duration::from_millis(tick_interval_ms));
@@ -201,7 +213,7 @@ struct DeterministicEngineCore<R: EventRepository> {
     tick_interval_ms: u64,
     base_seed: u64,
     schedule_counter: u64,
-    command_rx: mpsc::UnboundedReceiver<NodeSendCommand>,
+    command_rx: mpsc::UnboundedReceiver<EngineCommand>,
     delivery_heap: BinaryHeap<Reverse<HeapEntry>>,
     status: Arc<RwLock<EngineStatus>>,
     max_inbox_drain_per_tick: usize,
@@ -319,7 +331,12 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             match self.command_rx.try_recv() {
                 Ok(cmd) => {
                     drained += 1;
-                    self.schedule_delivery(cmd);
+                    match cmd {
+                        EngineCommand::Send(send) => self.schedule_delivery(send),
+                        EngineCommand::UpsertMinerNode(node) => {
+                            self.apply_upsert_node(node).await?;
+                        }
+                    }
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => break,
@@ -465,6 +482,41 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         log::info!("Genesis block initialized");
     }
 
+    async fn bootstrap_from_repo(&mut self) -> Result<(), DomainRepoError> {
+        // Always ensure synthetic genesis exists for parent traversal.
+        self.initialize_genesis();
+
+        let (entries, persisted_tip) = self.repo.load_chain_state().await?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        for entry in entries {
+            self.block_index
+                .insert(entry.header.block_id.clone(), entry);
+        }
+
+        if let Some(tip) = persisted_tip {
+            self.active_tip = Some(tip.clone());
+            if let Some(tip_entry) = self.block_index.get(&tip.block_id) {
+                self.sim_time_ms = self.sim_time_ms.max(tip_entry.header.timestamp_ms);
+            }
+            for node_id in self.nodes.keys() {
+                self.node_tips.entry(node_id.clone()).or_insert(NodeTip {
+                    block_id: tip.block_id.clone(),
+                    height: tip.height,
+                });
+            }
+            log::info!(
+                "Engine chain bootstrap loaded: tip={} height={}",
+                tip.block_id,
+                tip.height
+            );
+        }
+
+        Ok(())
+    }
+
     async fn update_status(&self) {
         let mut status = self.status.write().await;
         status.running = true;
@@ -488,6 +540,49 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
     async fn run_network_tick(&mut self) -> Result<(), DomainRepoError> {
         self.try_spawn_tx().await?;
         self.try_mine_block().await
+    }
+
+    async fn apply_upsert_node(&mut self, node: MinerNodeProfile) -> Result<(), DomainRepoError> {
+        let node_id = node.node_id.clone();
+        self.nodes.insert(node_id.clone(), node.clone());
+        self.mining_state
+            .entry(node_id.clone())
+            .or_insert(NodeMiningState { nonce_counter: 0 });
+        self.node_tips.entry(node_id.clone()).or_insert_with(|| NodeTip {
+            block_id: self
+                .active_tip
+                .as_ref()
+                .map(|t| t.block_id.clone())
+                .unwrap_or_else(|| "genesis".to_string()),
+            height: self.active_tip.as_ref().map(|t| t.height).unwrap_or(0),
+        });
+        self.emit_event(
+            "node.config_upserted.v1",
+            json!({
+                "node_id": node.node_id,
+                "hash_rate": node.hash_rate,
+                "is_online": node.is_online,
+                "has_relay": node.has_relay,
+            }),
+            true,
+        )
+        .await?;
+
+        // Auto-enable mining network when first online miner arrives at runtime.
+        if !self.network.enabled && self.total_online_hash_rate() > 0 {
+            self.network.enabled = true;
+            self.emit_event(
+                "engine.network_enabled.v1",
+                json!({
+                    "reason": "runtime_node_upsert",
+                    "online_hash_rate": self.total_online_hash_rate(),
+                }),
+                true,
+            )
+            .await?;
+        }
+
+        Ok(())
     }
 
     async fn try_spawn_tx(&mut self) -> Result<(), DomainRepoError> {
@@ -635,6 +730,18 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
     }
 
     async fn connect_block(&mut self, block: &Block) -> Result<(), DomainRepoError> {
+        self.repo
+            .upsert_block(
+                block,
+                self.block_index
+                    .get(&block.header.block_id)
+                    .map(|e| e.cumulative_work)
+                    .unwrap_or(0),
+                self.current_seq_id.saturating_add(1),
+                "active",
+            )
+            .await?;
+
         // 1. Remove txs from mempool
         for tx_id in &block.tx_ids {
             self.mempool.remove(tx_id);
@@ -689,6 +796,18 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
     }
 
     async fn disconnect_block(&mut self, block: &Block) -> Result<(), DomainRepoError> {
+        self.repo
+            .upsert_block(
+                block,
+                self.block_index
+                    .get(&block.header.block_id)
+                    .map(|e| e.cumulative_work)
+                    .unwrap_or(0),
+                self.current_seq_id.saturating_add(1),
+                "pending",
+            )
+            .await?;
+
         // 1. Add txs back to mempool (Simplified: we don't have full tx content here unless we store it)
         // In this simulation, we might lose txs if we don't persist them fully.
         // For now, we accept that disconnected txs might be lost from mempool in this simplified model,
@@ -839,28 +958,35 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
     }
 
     fn current_mining_target(&self, difficulty: u64) -> u64 {
-        // Compute target from expected trials so average block time tracks config.
-        const TRIAL_RATE_SCALE: u64 = 10;
-        let total_hash = self.total_online_hash_rate().max(1);
-        let expected_trials = total_hash
+        // Compute target from effective (capped) trials, not raw hash rate.
+        // This keeps expected block time stable even when per-node trial caps are active.
+        let total_trials_per_tick = self.total_online_trials_per_tick().max(1);
+        let expected_trials = total_trials_per_tick
             .saturating_mul(self.network.target_block_time_ms.max(1))
-            .saturating_div(TRIAL_RATE_SCALE)
+            .saturating_div(self.tick_interval_ms.max(1))
             .max(1);
         let effective_trials = expected_trials.saturating_mul(difficulty.max(1));
         (u64::MAX / effective_trials.max(1)).max(1)
     }
 
+    fn total_online_trials_per_tick(&self) -> u64 {
+        self.nodes
+            .values()
+            .filter(|n| n.is_online && n.hash_rate > 0)
+            .map(|n| self.trials_for_tick(n.hash_rate))
+            .fold(0u64, |acc, v| acc.saturating_add(v))
+    }
+
     fn mini_pow_hash(&self, node_id: &str, parent_hash: &str, nonce: u64, trial_offset: u64) -> u64 {
-        let mut seed = splitmix64(
-            self.base_seed
-                ^ hash_str64(node_id)
-                ^ hash_str64(parent_hash)
-                ^ nonce
-                ^ trial_offset
-                ^ (self.sim_time_ms as u64),
-        );
+        // Mix each component in sequence to avoid xor-cancellation patterns
+        // that can bias low-hit probability in large deterministic loops.
+        let mut seed = splitmix64(self.base_seed ^ hash_str64(node_id));
+        seed = splitmix64(seed ^ hash_str64(parent_hash));
+        seed = splitmix64(seed ^ nonce);
+        seed = splitmix64(seed ^ trial_offset);
+        seed = splitmix64(seed ^ (self.sim_time_ms as u64));
         seed = splitmix64(seed ^ self.schedule_counter);
-        xorshift64(seed)
+        splitmix64(seed)
     }
 
     fn broadcast_to_online_nodes(
@@ -1063,6 +1189,14 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             status: BlockStatus::Valid,
         };
         self.block_index.insert(block.header.block_id.clone(), entry.clone());
+        self.repo
+            .upsert_block(
+                &block,
+                cumulative_work,
+                self.current_seq_id.saturating_add(1),
+                "pending",
+            )
+            .await?;
 
         // 3. Chain Selection
         let current_tip_header = match &self.active_tip {
@@ -1081,8 +1215,6 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         let fork_point = ConsensusService::find_fork_point(old_tip_id, new_tip_id, &self.block_index)
             .ok_or(DomainRepoError("Fork point not found".to_string()))?;
 
-        log::info!("Reorg triggered: {} -> {} (Fork: {})", old_tip_id, new_tip_id, fork_point);
-
         // 1. Collect blocks to disconnect
         let mut to_disconnect = Vec::new();
         let mut curr = old_tip_id.to_string();
@@ -1096,14 +1228,14 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         }
 
         // Process disconnects
-        for block_id in to_disconnect {
-            if let Some(entry) = self.block_index.get_mut(&block_id) {
+        for block_id in &to_disconnect {
+            if let Some(entry) = self.block_index.get_mut(block_id) {
                 entry.status = BlockStatus::Valid; // Downgrade
             }
             // Reconstruct block for disconnect logic
             // We need to clone data to avoid borrow conflict
             let (header, tx_ids) = {
-                let entry = self.block_index.get(&block_id).unwrap();
+                let entry = self.block_index.get(block_id).unwrap();
                 (entry.header.clone(), entry.tx_ids.clone())
             };
             let block = Block { header, tx_ids };
@@ -1122,6 +1254,27 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             }
         }
         to_connect.reverse(); // Process forward
+
+        let disconnect_count = to_disconnect.len();
+        let connect_count = to_connect.len();
+        let is_extension = fork_point == old_tip_id;
+        if is_extension {
+            log::info!(
+                "Chain extended: {} -> {} (height +{})",
+                old_tip_id,
+                new_tip_id,
+                connect_count
+            );
+        } else {
+            log::info!(
+                "Reorg triggered: {} -> {} (Fork: {}, disconnect={}, connect={})",
+                old_tip_id,
+                new_tip_id,
+                fork_point,
+                disconnect_count,
+                connect_count
+            );
+        }
 
         // Process connects
         for block_id in to_connect {
@@ -1152,6 +1305,9 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 "new_tip": new_tip_id,
                 "fork_point": fork_point,
                 "height": new_tip_entry.header.height,
+                "is_reorg": !is_extension,
+                "disconnect_count": disconnect_count,
+                "connect_count": connect_count,
             }),
             true,
         ).await?;
