@@ -39,6 +39,28 @@ With PostgreSQL running and `DATABASE_URL` set in `.env`:
 cargo run --bin migrate
 ```
 
+Reset schema from scratch (drop all tables then re-apply migrations):
+
+```bash
+cargo run --bin reset
+```
+
+Rollback migrations:
+
+```bash
+# Down 1 migration
+cargo run --bin rollback
+
+# Down N migrations
+cargo run --bin rollback -- 3
+```
+
+Show applied migrations:
+
+```bash
+cargo run --bin status
+```
+
 This runs the built-in migrate binary (reads `DATABASE_URL` from `.env`). Alternative: install and use SeaORM CLI:
 
 ```bash

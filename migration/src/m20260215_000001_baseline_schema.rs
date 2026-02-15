@@ -117,8 +117,7 @@ impl MigrationTrait for Migration {
                 seq_id BIGINT PRIMARY KEY,
                 event_type VARCHAR(64) NOT NULL,
                 server_time_ms BIGINT NOT NULL,
-                payload_json TEXT,
-                room_id VARCHAR(64) NOT NULL
+                payload_json TEXT
             );
             "#,
         )
@@ -126,9 +125,8 @@ impl MigrationTrait for Migration {
 
         db.execute_unprepared(
             r#"
-            CREATE TABLE IF NOT EXISTS room_snapshots (
+            CREATE TABLE IF NOT EXISTS snapshots (
                 id SERIAL PRIMARY KEY,
-                room_id VARCHAR(64) NOT NULL,
                 snapshot_seq_id BIGINT NOT NULL,
                 created_at_ms BIGINT NOT NULL,
                 storage_uri TEXT,
@@ -158,10 +156,8 @@ impl MigrationTrait for Migration {
             "CREATE INDEX IF NOT EXISTS idx_transactions_status_created ON transactions(status, created_at_ms);",
         )
         .await?;
-        db.execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_event_log_room_seq ON event_log(room_id, seq_id);",
-        )
-        .await?;
+        db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_event_log_seq ON event_log(seq_id);")
+            .await?;
         db.execute_unprepared(
             "CREATE INDEX IF NOT EXISTS idx_reward_settlements_miner_state ON reward_settlements(miner_node_id, state);",
         )
@@ -172,7 +168,7 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP TABLE IF EXISTS room_snapshots;").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS snapshots;").await?;
         db.execute_unprepared("DROP TABLE IF EXISTS event_log;").await?;
         db.execute_unprepared("DROP TABLE IF EXISTS reward_settlements;").await?;
         db.execute_unprepared("DROP TABLE IF EXISTS difficulty_states;").await?;

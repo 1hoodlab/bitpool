@@ -11,7 +11,7 @@ flowchart TD
     DifficultyStates[difficulty_states]
     RewardSettlements[reward_settlements]
     EventLog[event_log]
-    RoomSnapshots[room_snapshots]
+    Snapshots[snapshots]
 
     Nodes -->|"miner_node_id"| Blocks
     Blocks -->|"parent_id"| Blocks
@@ -19,7 +19,7 @@ flowchart TD
     Transactions --> BlockTransactions
     Blocks --> RewardSettlements
     Nodes --> RewardSettlements
-    EventLog --> RoomSnapshots
+    EventLog --> Snapshots
 ```
 
 ## Tables and key columns
@@ -30,8 +30,8 @@ flowchart TD
 - `block_transactions(id PK, block_id FK, tx_id FK, position, UNIQUE(block_id, position))`
 - `difficulty_states(id PK, height_anchor, target, window_n, anchor_time_ms, ...)`
 - `reward_settlements(id PK, block_id FK, miner_node_id FK, state, confirmations, amount_sats, ...)`
-- `event_log(seq_id PK, room_id, event_type, server_time_ms, payload_json)`
-- `room_snapshots(id PK, room_id, snapshot_seq_id, dag_pruned_to_height, storage_uri)`
+- `event_log(seq_id PK, event_type, server_time_ms, payload_json)`
+- `snapshots(id PK, snapshot_seq_id, dag_pruned_to_height, storage_uri)`
 
 ## Indexing strategy
 
@@ -41,7 +41,7 @@ flowchart TD
 - `block_transactions(block_id, position)`
 - `block_transactions(tx_id)`
 - `transactions(status, created_at_ms)`
-- `event_log(room_id, seq_id)`
+- `event_log(seq_id)`
 - `reward_settlements(miner_node_id, state)`
 
 ## Domain-to-persistence mapping

@@ -16,8 +16,8 @@ This document consolidates requirements from the two NotebookLM sources and `doc
 - `block_transactions`: block-to-transaction mapping.
 - `difficulty_states`: retarget history.
 - `reward_settlements`: pending/confirmed/lost rewards.
-- `event_log`: ordered event stream.
-- `room_snapshots`: snapshot metadata.
+- `event_log`: ordered global event stream.
+- `snapshots`: global snapshot metadata.
 
 ## Required constraints
 
