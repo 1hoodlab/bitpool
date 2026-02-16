@@ -4,4 +4,4 @@ mod error;
 mod event_repository;
 
 pub use error::DomainRepoError;
-pub use event_repository::EventRepository;
+pub use event_repository::{EventRepository, RewardSettlementWrite};

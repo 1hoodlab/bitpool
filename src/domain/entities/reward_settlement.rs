@@ -17,4 +17,5 @@ pub struct Reward {
     pub status: RewardStatus,
     pub created_at_ms: i64,
     pub matured_at_height: Option<i64>,
+    pub settled_at_ms: Option<i64>,
 }

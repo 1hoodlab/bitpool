@@ -32,20 +32,6 @@ impl MigrationTrait for Migration {
 
         db.execute_unprepared(
             r#"
-            CREATE TABLE IF NOT EXISTS transactions (
-                tx_id VARCHAR(64) PRIMARY KEY,
-                fee_sats BIGINT NOT NULL DEFAULT 0 CHECK (fee_sats >= 0),
-                weight INTEGER NOT NULL DEFAULT 0,
-                created_at_ms BIGINT NOT NULL,
-                risk VARCHAR(64),
-                status VARCHAR(32) NOT NULL DEFAULT 'pending'
-            );
-            "#,
-        )
-        .await?;
-
-        db.execute_unprepared(
-            r#"
             CREATE TABLE IF NOT EXISTS blocks (
                 block_id VARCHAR(64) PRIMARY KEY,
                 parent_id VARCHAR(64) REFERENCES blocks(block_id),
@@ -68,36 +54,6 @@ impl MigrationTrait for Migration {
 
         db.execute_unprepared(
             r#"
-            CREATE TABLE IF NOT EXISTS block_transactions (
-                id BIGSERIAL PRIMARY KEY,
-                block_id VARCHAR(64) NOT NULL REFERENCES blocks(block_id) ON DELETE CASCADE,
-                tx_id VARCHAR(64) NOT NULL REFERENCES transactions(tx_id),
-                position INTEGER NOT NULL,
-                UNIQUE(block_id, position)
-            );
-            "#,
-        )
-        .await?;
-
-        db.execute_unprepared(
-            r#"
-            CREATE TABLE IF NOT EXISTS difficulty_states (
-                id SERIAL PRIMARY KEY,
-                height_anchor BIGINT NOT NULL,
-                target VARCHAR(64) NOT NULL,
-                window_n INTEGER NOT NULL,
-                anchor_time_ms BIGINT NOT NULL,
-                clamp_meta VARCHAR(128),
-                expected_block_time_ms BIGINT,
-                min_target VARCHAR(64),
-                max_target VARCHAR(64)
-            );
-            "#,
-        )
-        .await?;
-
-        db.execute_unprepared(
-            r#"
             CREATE TABLE IF NOT EXISTS reward_settlements (
                 id SERIAL PRIMARY KEY,
                 block_id VARCHAR(64) NOT NULL REFERENCES blocks(block_id),
@@ -105,7 +61,8 @@ impl MigrationTrait for Migration {
                 state VARCHAR(32) NOT NULL,
                 confirmations INTEGER NOT NULL DEFAULT 0 CHECK (confirmations >= 0),
                 settled_at_ms BIGINT,
-                amount_sats BIGINT NOT NULL DEFAULT 0
+                amount_sats BIGINT NOT NULL DEFAULT 0,
+                UNIQUE(block_id)
             );
             "#,
         )
@@ -123,19 +80,6 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        db.execute_unprepared(
-            r#"
-            CREATE TABLE IF NOT EXISTS snapshots (
-                id SERIAL PRIMARY KEY,
-                snapshot_seq_id BIGINT NOT NULL,
-                created_at_ms BIGINT NOT NULL,
-                storage_uri TEXT,
-                dag_pruned_to_height BIGINT
-            );
-            "#,
-        )
-        .await?;
-
         db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_blocks_parent_id ON blocks(parent_id);")
             .await?;
         db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_blocks_height ON blocks(height);")
@@ -144,22 +88,14 @@ impl MigrationTrait for Migration {
             "CREATE INDEX IF NOT EXISTS idx_blocks_cumulative_work_first_seen ON blocks(cumulative_work DESC, first_seen_seq_id ASC);",
         )
         .await?;
-        db.execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_block_transactions_block_position ON block_transactions(block_id, position);",
-        )
-        .await?;
-        db.execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_block_transactions_tx_id ON block_transactions(tx_id);",
-        )
-        .await?;
-        db.execute_unprepared(
-            "CREATE INDEX IF NOT EXISTS idx_transactions_status_created ON transactions(status, created_at_ms);",
-        )
-        .await?;
         db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_event_log_seq ON event_log(seq_id);")
             .await?;
         db.execute_unprepared(
             "CREATE INDEX IF NOT EXISTS idx_reward_settlements_miner_state ON reward_settlements(miner_node_id, state);",
+        )
+        .await?;
+        db.execute_unprepared(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_reward_settlements_block_id_unique ON reward_settlements(block_id);",
         )
         .await?;
 
@@ -168,13 +104,9 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP TABLE IF EXISTS snapshots;").await?;
         db.execute_unprepared("DROP TABLE IF EXISTS event_log;").await?;
         db.execute_unprepared("DROP TABLE IF EXISTS reward_settlements;").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS difficulty_states;").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS block_transactions;").await?;
         db.execute_unprepared("DROP TABLE IF EXISTS blocks;").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS transactions;").await?;
         db.execute_unprepared("DROP TABLE IF EXISTS nodes;").await?;
         Ok(())
     }

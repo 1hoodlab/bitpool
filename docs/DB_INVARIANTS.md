@@ -8,9 +8,9 @@
 
 ## Reward settlement
 
-- Rewards start in `Pending`.
+- Rewards start in `Immature`.
 - Rewards move to `Confirmed` only when block reaches K confirmations on canonical chain.
-- Reorg can move rewards from `Pending/Confirmed` to `Lost` when block leaves canonical chain.
+- Reorg can move rewards from `Immature/Confirmed` to `Orphaned` when block leaves canonical chain.
 - Reward updates must be transactional with chain status updates.
 
 ## Node tip consistency
@@ -18,8 +18,7 @@
 - `nodes.tip_block_id` must reference the node-local best chain tip.
 - During reorg, all affected node tips must update atomically with reward and block status changes.
 
-## Event and snapshot consistency
+## Event consistency
 
 - `event_log.seq_id` is globally increasing for deterministic replay.
-- Snapshots are cut at a known `snapshot_seq_id`.
-- Replay from `event_log(seq_id)` after snapshot must reconstruct equivalent state.
+- Replay from `event_log(seq_id)` must reconstruct equivalent state.

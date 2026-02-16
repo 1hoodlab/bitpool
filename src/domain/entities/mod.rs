@@ -6,7 +6,6 @@ mod network_sim;
 pub mod block;
 pub mod chain;
 pub mod reward_settlement;
-pub mod difficulty_state;
 
 pub use event_envelope::{EventEnvelope, EventType};
 pub use network_sim::{MessageKind, NodeSendCommand, ScheduledDelivery};

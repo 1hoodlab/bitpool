@@ -6,26 +6,21 @@ This document consolidates requirements from the two NotebookLM sources and `doc
 
 - Server-authoritative mining simulation with a PoW-like block flow.
 - Persistent PostgreSQL storage for business state and reconciliation.
-- Realtime synchronization through event log replay and periodic snapshots.
+- Realtime synchronization through event log replay.
 
 ## Core entities
 
 - `nodes`: player/AI operator state.
-- `transactions`: mempool transactions.
 - `blocks`: DAG/chain blocks.
-- `block_transactions`: block-to-transaction mapping.
-- `difficulty_states`: retarget history.
-- `reward_settlements`: pending/confirmed/lost rewards.
+- `reward_settlements`: immature/confirmed/orphaned reward lifecycle.
 - `event_log`: ordered global event stream.
-- `snapshots`: global snapshot metadata.
 
 ## Required constraints
 
-- Unique identifiers for `node_id`, `tx_id`, `block_id`, `seq_id`.
+- Unique identifiers for `node_id`, `block_id`, `seq_id`.
 - Referential integrity for chain and reward relationships.
 - Data checks:
   - `hash_rate >= 0`
-  - `fee_sats >= 0`
   - `confirmations >= 0`
   - `total_weight <= 4000`
 

@@ -13,7 +13,7 @@ use crate::domain::entities::{
     Block, BlockHeader, BlockIndexEntry, BlockStatus, ChainTip, EventEnvelope, EventType,
     NodeSendCommand, Reward, RewardStatus, ScheduledDelivery,
 };
-use crate::domain::repositories::{DomainRepoError, EventRepository};
+use crate::domain::repositories::{DomainRepoError, EventRepository, RewardSettlementWrite};
 use crate::domain::services::consensus::ConsensusService;
 use crate::helper::deterministic_rng::{hash_str64, splitmix64, xorshift64};
 
@@ -730,18 +730,6 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
     }
 
     async fn connect_block(&mut self, block: &Block) -> Result<(), DomainRepoError> {
-        self.repo
-            .upsert_block(
-                block,
-                self.block_index
-                    .get(&block.header.block_id)
-                    .map(|e| e.cumulative_work)
-                    .unwrap_or(0),
-                self.current_seq_id.saturating_add(1),
-                "active",
-            )
-            .await?;
-
         // 1. Remove txs from mempool
         for tx_id in &block.tx_ids {
             self.mempool.remove(tx_id);
@@ -757,6 +745,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             status: RewardStatus::Immature,
             created_at_ms: self.sim_time_ms,
             matured_at_height: None,
+            settled_at_ms: None,
         };
         self.rewards.insert(reward_id, reward);
 
@@ -772,6 +761,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                      if entry.header.height == mature_height && entry.status == BlockStatus::Active && reward.status == RewardStatus::Immature {
                          reward.status = RewardStatus::Confirmed;
                          reward.matured_at_height = Some(block.header.height);
+                         reward.settled_at_ms = Some(self.sim_time_ms);
                          matured.push(reward.clone());
                      }
                  }
@@ -792,22 +782,13 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             }
         }
 
+        self.persist_block_and_all_reward_settlements(block, "active")
+            .await?;
+
         Ok(())
     }
 
     async fn disconnect_block(&mut self, block: &Block) -> Result<(), DomainRepoError> {
-        self.repo
-            .upsert_block(
-                block,
-                self.block_index
-                    .get(&block.header.block_id)
-                    .map(|e| e.cumulative_work)
-                    .unwrap_or(0),
-                self.current_seq_id.saturating_add(1),
-                "pending",
-            )
-            .await?;
-
         // 1. Add txs back to mempool (Simplified: we don't have full tx content here unless we store it)
         // In this simulation, we might lose txs if we don't persist them fully.
         // For now, we accept that disconnected txs might be lost from mempool in this simplified model,
@@ -819,7 +800,68 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             reward.status = RewardStatus::Orphaned;
         }
 
+        self.persist_block_and_all_reward_settlements(block, "pending")
+            .await?;
+
         Ok(())
+    }
+
+    fn canonical_tip_height(&self) -> i64 {
+        self.block_index
+            .values()
+            .filter(|entry| matches!(entry.status, BlockStatus::Active))
+            .map(|entry| entry.header.height)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn reward_confirmations(&self, block_hash: &str) -> i32 {
+        let Some(entry) = self.block_index.get(block_hash) else {
+            return 0;
+        };
+        if !matches!(entry.status, BlockStatus::Active) {
+            return 0;
+        }
+        let tip_height = self.canonical_tip_height();
+        if tip_height < entry.header.height {
+            return 0;
+        }
+        let conf = tip_height
+            .saturating_sub(entry.header.height)
+            .saturating_add(1);
+        conf.min(i32::MAX as i64) as i32
+    }
+
+    fn build_reward_settlement_writes(&self) -> Vec<RewardSettlementWrite> {
+        let mut rewards = self.rewards.values().cloned().collect::<Vec<_>>();
+        rewards.sort_by(|a, b| a.id.cmp(&b.id));
+        rewards
+            .into_iter()
+            .map(|reward| RewardSettlementWrite {
+                confirmations: self.reward_confirmations(&reward.block_hash),
+                reward,
+            })
+            .collect()
+    }
+
+    async fn persist_block_and_all_reward_settlements(
+        &self,
+        block: &Block,
+        chain_status: &str,
+    ) -> Result<(), DomainRepoError> {
+        let reward_writes = self.build_reward_settlement_writes();
+        self.repo
+            .upsert_block_with_reward_settlements(
+                block,
+                self.block_index
+                    .get(&block.header.block_id)
+                    .map(|e| e.cumulative_work)
+                    .unwrap_or(0),
+                self.current_seq_id.saturating_add(1),
+                chain_status,
+                &reward_writes,
+            )
+            .await
     }
 
     fn build_spawned_tx(&self, tx_counter: u64) -> MempoolTx {

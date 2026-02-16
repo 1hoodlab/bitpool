@@ -1,9 +1,11 @@
 use async_trait::async_trait;
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait};
 
 use crate::database::entities::{EventLogInsert, EventLogRow};
-use crate::domain::entities::{Block, BlockHeader, BlockIndexEntry, BlockStatus, ChainTip, EventEnvelope};
-use crate::domain::repositories::{DomainRepoError, EventRepository};
+use crate::domain::entities::{
+    Block, BlockHeader, BlockIndexEntry, BlockStatus, ChainTip, EventEnvelope, Reward, RewardStatus,
+};
+use crate::domain::repositories::{DomainRepoError, EventRepository, RewardSettlementWrite};
 
 pub async fn connect_postgres(database_url: &str) -> Result<DatabaseConnection, sea_orm::DbErr> {
     Database::connect(database_url).await
@@ -116,75 +118,51 @@ impl EventRepository for SeaOrmEventRepository {
         first_seen_seq_id: i64,
         chain_status: &str,
     ) -> Result<(), DomainRepoError> {
-        let cumulative_work_i64 = cumulative_work.min(i64::MAX as u128) as i64;
-        let work_i64 = (block.header.difficulty as u128).min(i64::MAX as u128) as i64;
-        let nonce_visual = block.header.nonce.to_string();
-        let target = block.header.difficulty.to_string();
-        let parent_id = if block.header.parent_hash.is_empty() || block.header.parent_hash == "genesis"
-        {
-            None
-        } else {
-            Some(block.header.parent_hash.clone())
-        };
-
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            INSERT INTO blocks (
-                block_id,
-                parent_id,
-                height,
-                found_time_ms,
-                target,
-                total_weight,
-                fees_sats,
-                work,
-                cumulative_work,
-                miner_node_id,
-                first_seen_seq_id,
-                chain_status,
-                nonce_visual,
-                subsidy_sats
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            ON CONFLICT (block_id)
-            DO UPDATE SET
-                parent_id = EXCLUDED.parent_id,
-                height = EXCLUDED.height,
-                found_time_ms = EXCLUDED.found_time_ms,
-                target = EXCLUDED.target,
-                total_weight = EXCLUDED.total_weight,
-                fees_sats = EXCLUDED.fees_sats,
-                work = EXCLUDED.work,
-                cumulative_work = EXCLUDED.cumulative_work,
-                miner_node_id = EXCLUDED.miner_node_id,
-                first_seen_seq_id = LEAST(blocks.first_seen_seq_id, EXCLUDED.first_seen_seq_id),
-                chain_status = EXCLUDED.chain_status,
-                nonce_visual = EXCLUDED.nonce_visual
-            "#
-            .to_string(),
-            vec![
-                block.header.block_id.clone().into(),
-                parent_id.into(),
-                block.header.height.into(),
-                block.header.timestamp_ms.into(),
-                target.into(),
-                (block.header.total_weight as i64).into(),
-                block.header.total_fees_sats.into(),
-                work_i64.into(),
-                cumulative_work_i64.into(),
-                block.header.miner_node_id.clone().into(),
-                first_seen_seq_id.into(),
-                chain_status.to_string().into(),
-                nonce_visual.into(),
-                0i64.into(),
-            ],
-        );
+        let stmt = build_upsert_block_statement(block, cumulative_work, first_seen_seq_id, chain_status);
 
         self.db
             .execute(stmt)
             .await
             .map_err(|e| DomainRepoError(format!("upsert block failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn upsert_block_with_reward_settlements(
+        &self,
+        block: &Block,
+        cumulative_work: u128,
+        first_seen_seq_id: i64,
+        chain_status: &str,
+        reward_writes: &[RewardSettlementWrite],
+    ) -> Result<(), DomainRepoError> {
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| DomainRepoError(format!("begin transaction failed: {e}")))?;
+
+        let block_stmt = build_upsert_block_statement(block, cumulative_work, first_seen_seq_id, chain_status);
+        txn.execute(block_stmt)
+            .await
+            .map_err(|e| DomainRepoError(format!("upsert block in transaction failed: {e}")))?;
+
+        for write in reward_writes {
+            let update_stmt = build_update_reward_settlement_statement(&write.reward, write.confirmations);
+            let update_result = txn.execute(update_stmt).await.map_err(|e| {
+                DomainRepoError(format!("update reward settlement in transaction failed: {e}"))
+            })?;
+            if update_result.rows_affected() == 0 {
+                let insert_stmt =
+                    build_insert_reward_settlement_statement(&write.reward, write.confirmations);
+                txn.execute(insert_stmt).await.map_err(|e| {
+                    DomainRepoError(format!("insert reward settlement in transaction failed: {e}"))
+                })?;
+            }
+        }
+
+        txn.commit()
+            .await
+            .map_err(|e| DomainRepoError(format!("commit transaction failed: {e}")))?;
         Ok(())
     }
 
@@ -306,6 +284,29 @@ impl EventRepository for SeaOrmEventRepository {
 
         Ok((entries, tip))
     }
+
+    async fn upsert_reward_settlement(
+        &self,
+        reward: &Reward,
+        confirmations: i32,
+    ) -> Result<(), DomainRepoError> {
+        let update_stmt = build_update_reward_settlement_statement(reward, confirmations);
+        let update_result = self
+            .db
+            .execute(update_stmt)
+            .await
+            .map_err(|e| DomainRepoError(format!("update reward settlement failed: {e}")))?;
+        if update_result.rows_affected() > 0 {
+            return Ok(());
+        }
+
+        let insert_stmt = build_insert_reward_settlement_statement(reward, confirmations);
+        self.db
+            .execute(insert_stmt)
+            .await
+            .map_err(|e| DomainRepoError(format!("insert reward settlement failed: {e}")))?;
+        Ok(())
+    }
 }
 
 impl SeaOrmEventRepository {
@@ -339,4 +340,135 @@ impl SeaOrmEventRepository {
         }
         Ok(events)
     }
+}
+
+fn reward_state_to_str(status: RewardStatus) -> &'static str {
+    match status {
+        RewardStatus::Immature => "immature",
+        RewardStatus::Confirmed => "confirmed",
+        RewardStatus::Orphaned => "orphaned",
+        RewardStatus::Spent => "spent",
+    }
+}
+
+fn build_upsert_block_statement(
+    block: &Block,
+    cumulative_work: u128,
+    first_seen_seq_id: i64,
+    chain_status: &str,
+) -> Statement {
+    let cumulative_work_i64 = cumulative_work.min(i64::MAX as u128) as i64;
+    let work_i64 = (block.header.difficulty as u128).min(i64::MAX as u128) as i64;
+    let nonce_visual = block.header.nonce.to_string();
+    let target = block.header.difficulty.to_string();
+    let parent_id = if block.header.parent_hash.is_empty() || block.header.parent_hash == "genesis" {
+        None
+    } else {
+        Some(block.header.parent_hash.clone())
+    };
+
+    Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        INSERT INTO blocks (
+            block_id,
+            parent_id,
+            height,
+            found_time_ms,
+            target,
+            total_weight,
+            fees_sats,
+            work,
+            cumulative_work,
+            miner_node_id,
+            first_seen_seq_id,
+            chain_status,
+            nonce_visual,
+            subsidy_sats
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (block_id)
+        DO UPDATE SET
+            parent_id = EXCLUDED.parent_id,
+            height = EXCLUDED.height,
+            found_time_ms = EXCLUDED.found_time_ms,
+            target = EXCLUDED.target,
+            total_weight = EXCLUDED.total_weight,
+            fees_sats = EXCLUDED.fees_sats,
+            work = EXCLUDED.work,
+            cumulative_work = EXCLUDED.cumulative_work,
+            miner_node_id = EXCLUDED.miner_node_id,
+            first_seen_seq_id = LEAST(blocks.first_seen_seq_id, EXCLUDED.first_seen_seq_id),
+            chain_status = EXCLUDED.chain_status,
+            nonce_visual = EXCLUDED.nonce_visual
+        "#
+        .to_string(),
+        vec![
+            block.header.block_id.clone().into(),
+            parent_id.into(),
+            block.header.height.into(),
+            block.header.timestamp_ms.into(),
+            target.into(),
+            (block.header.total_weight as i64).into(),
+            block.header.total_fees_sats.into(),
+            work_i64.into(),
+            cumulative_work_i64.into(),
+            block.header.miner_node_id.clone().into(),
+            first_seen_seq_id.into(),
+            chain_status.to_string().into(),
+            nonce_visual.into(),
+            0i64.into(),
+        ],
+    )
+}
+
+fn build_update_reward_settlement_statement(reward: &Reward, confirmations: i32) -> Statement {
+    Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        UPDATE reward_settlements
+        SET
+            miner_node_id = $2,
+            state = $3,
+            confirmations = $4,
+            settled_at_ms = $5,
+            amount_sats = $6
+        WHERE block_id = $1
+        "#
+        .to_string(),
+        vec![
+            reward.block_hash.clone().into(),
+            reward.miner_id.clone().into(),
+            reward_state_to_str(reward.status.clone()).into(),
+            confirmations.into(),
+            reward.settled_at_ms.into(),
+            reward.amount_sats.into(),
+        ],
+    )
+}
+
+fn build_insert_reward_settlement_statement(reward: &Reward, confirmations: i32) -> Statement {
+    Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        INSERT INTO reward_settlements (
+            block_id,
+            miner_node_id,
+            state,
+            confirmations,
+            settled_at_ms,
+            amount_sats
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#
+        .to_string(),
+        vec![
+            reward.block_hash.clone().into(),
+            reward.miner_id.clone().into(),
+            reward_state_to_str(reward.status.clone()).into(),
+            confirmations.into(),
+            reward.settled_at_ms.into(),
+            reward.amount_sats.into(),
+        ],
+    )
 }
