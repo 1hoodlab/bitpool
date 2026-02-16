@@ -225,7 +225,7 @@ struct DeterministicEngineCore<R: EventRepository> {
     nodes: HashMap<String, MinerNodeProfile>,
     mining_state: HashMap<String, NodeMiningState>,
     node_tips: HashMap<String, NodeTip>,
-    
+
     // Phase 3: Consensus & Chain State
     block_index: HashMap<String, BlockIndexEntry>,
     active_tip: Option<ChainTip>,
@@ -312,7 +312,9 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
     }
 
     async fn run_single_tick(&mut self) -> Result<(), DomainRepoError> {
-        self.sim_time_ms = self.sim_time_ms.saturating_add(self.tick_interval_ms as i64);
+        self.sim_time_ms = self
+            .sim_time_ms
+            .saturating_add(self.tick_interval_ms as i64);
 
         self.emit_event(
             EventType::ENGINE_TICK_V1,
@@ -423,7 +425,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 "msg_id": delivery.msg_id,
                 "payload": delivery.payload,
             }),
-            false,
+            true,
         )
         .await?;
         self.handle_delivery(&delivery).await
@@ -453,7 +455,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         if self.active_tip.is_some() {
             return;
         }
-        
+
         // Create Genesis Block
         let genesis_header = BlockHeader {
             block_id: "genesis".to_string(),
@@ -466,21 +468,22 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             total_weight: 0,
             total_fees_sats: 0,
         };
-        
+
         let genesis_entry = BlockIndexEntry {
             header: genesis_header.clone(),
             tx_ids: vec![],
             cumulative_work: 1, // Start with 1 work
             status: BlockStatus::Active,
         };
-        
-        self.block_index.insert("genesis".to_string(), genesis_entry);
+
+        self.block_index
+            .insert("genesis".to_string(), genesis_entry);
         self.active_tip = Some(ChainTip {
             block_id: "genesis".to_string(),
             height: 0,
             cumulative_work: 1,
         });
-        
+
         log::info!("Genesis block initialized");
     }
 
@@ -532,7 +535,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         status.pending_deliveries = self.delivery_heap.len();
         status.mempool_size = self.mempool.len();
         status.online_nodes = self.nodes.values().filter(|n| n.is_online).count();
-        
+
         if let Some(tip) = &self.active_tip {
             status.last_block_height = tip.height;
             status.last_block_found_id = Some(tip.block_id.clone());
@@ -553,14 +556,16 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         self.mining_state
             .entry(node_id.clone())
             .or_insert(NodeMiningState { nonce_counter: 0 });
-        self.node_tips.entry(node_id.clone()).or_insert_with(|| NodeTip {
-            block_id: self
-                .active_tip
-                .as_ref()
-                .map(|t| t.block_id.clone())
-                .unwrap_or_else(|| "genesis".to_string()),
-            height: self.active_tip.as_ref().map(|t| t.height).unwrap_or(0),
-        });
+        self.node_tips
+            .entry(node_id.clone())
+            .or_insert_with(|| NodeTip {
+                block_id: self
+                    .active_tip
+                    .as_ref()
+                    .map(|t| t.block_id.clone())
+                    .unwrap_or_else(|| "genesis".to_string()),
+                height: self.active_tip.as_ref().map(|t| t.height).unwrap_or(0),
+            });
         self.emit_event(
             "node.config_upserted.v1",
             json!({
@@ -760,7 +765,8 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             .values()
             .filter(|reward| reward.status == RewardStatus::Immature)
             .filter(|reward| {
-                self.reward_confirmations(&reward.block_hash) >= REWARD_MATURITY_CONFIRMATIONS as i32
+                self.reward_confirmations(&reward.block_hash)
+                    >= REWARD_MATURITY_CONFIRMATIONS as i32
             })
             .map(|reward| reward.id.clone())
             .collect::<Vec<_>>();
@@ -855,7 +861,8 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         let tip_height = self.canonical_tip_height();
         let reward_ids = self.rewards.keys().cloned().collect::<Vec<_>>();
         for reward_id in reward_ids {
-            let Some(block_hash) = self.rewards.get(&reward_id).map(|r| r.block_hash.clone()) else {
+            let Some(block_hash) = self.rewards.get(&reward_id).map(|r| r.block_hash.clone())
+            else {
                 continue;
             };
             let Some(entry) = self.block_index.get(&block_hash) else {
@@ -1076,7 +1083,13 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             .fold(0u64, |acc, v| acc.saturating_add(v))
     }
 
-    fn mini_pow_hash(&self, node_id: &str, parent_hash: &str, nonce: u64, trial_offset: u64) -> u64 {
+    fn mini_pow_hash(
+        &self,
+        node_id: &str,
+        parent_hash: &str,
+        nonce: u64,
+        trial_offset: u64,
+    ) -> u64 {
         // Mix each component in sequence to avoid xor-cancellation patterns
         // that can bias low-hit probability in large deterministic loops.
         let mut seed = splitmix64(self.base_seed ^ hash_str64(node_id));
@@ -1198,7 +1211,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                
+
                 // Reconstruct block from payload (simplified for simulation)
                 let header = BlockHeader {
                     block_id: block_id.clone(),
@@ -1226,21 +1239,19 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                     false,
                 )
                 .await?;
-                self.update_tip(
-                    &delivery.to,
-                    NodeTip {
-                        block_id,
-                        height,
-                    },
-                )
-                .await?;
+                self.update_tip(&delivery.to, NodeTip { block_id, height })
+                    .await?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    async fn update_tip(&mut self, node_id: &str, next_tip: NodeTip) -> Result<(), DomainRepoError> {
+    async fn update_tip(
+        &mut self,
+        node_id: &str,
+        next_tip: NodeTip,
+    ) -> Result<(), DomainRepoError> {
         let should_update = match self.node_tips.get(node_id) {
             Some(curr) => next_tip.height > curr.height,
             None => true,
@@ -1287,7 +1298,8 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             cumulative_work,
             status: BlockStatus::Valid,
         };
-        self.block_index.insert(block.header.block_id.clone(), entry.clone());
+        self.block_index
+            .insert(block.header.block_id.clone(), entry.clone());
         self.repo
             .upsert_block(
                 &block,
@@ -1303,16 +1315,23 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             None => parent_entry.header.clone(), // Should not happen if genesis exists
         };
 
-        if ConsensusService::is_better_chain(&block.header, &current_tip_header, &self.block_index) {
-            self.reorganize(&current_tip_header.block_id, &block.header.block_id).await?;
+        if ConsensusService::is_better_chain(&block.header, &current_tip_header, &self.block_index)
+        {
+            self.reorganize(&current_tip_header.block_id, &block.header.block_id)
+                .await?;
         }
 
         Ok(())
     }
 
-    async fn reorganize(&mut self, old_tip_id: &str, new_tip_id: &str) -> Result<(), DomainRepoError> {
-        let fork_point = ConsensusService::find_fork_point(old_tip_id, new_tip_id, &self.block_index)
-            .ok_or(DomainRepoError("Fork point not found".to_string()))?;
+    async fn reorganize(
+        &mut self,
+        old_tip_id: &str,
+        new_tip_id: &str,
+    ) -> Result<(), DomainRepoError> {
+        let fork_point =
+            ConsensusService::find_fork_point(old_tip_id, new_tip_id, &self.block_index)
+                .ok_or(DomainRepoError("Fork point not found".to_string()))?;
 
         // 1. Collect blocks to disconnect
         let mut to_disconnect = Vec::new();
@@ -1322,7 +1341,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 to_disconnect.push(curr.clone());
                 curr = entry.header.parent_hash.clone();
             } else {
-                break; 
+                break;
             }
         }
 
@@ -1380,7 +1399,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             if let Some(entry) = self.block_index.get_mut(&block_id) {
                 entry.status = BlockStatus::Active;
             }
-             // Reconstruct block for connect logic
+            // Reconstruct block for connect logic
             let (header, tx_ids) = {
                 let entry = self.block_index.get(&block_id).unwrap();
                 (entry.header.clone(), entry.tx_ids.clone())
@@ -1409,11 +1428,11 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 "connect_count": connect_count,
             }),
             true,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
-
 
     fn sample_propagation_delay_ms(
         &self,

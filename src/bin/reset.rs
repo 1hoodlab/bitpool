@@ -28,7 +28,10 @@ fn redact_url(url: &str) -> Option<String> {
             .or_else(|| url.strip_prefix("postgresql://"))
             .unwrap_or(url);
         let (user_pass, host_db) = after_scheme.split_once('@')?;
-        let user = user_pass.split_once(':').map(|(u, _)| u).unwrap_or(user_pass);
+        let user = user_pass
+            .split_once(':')
+            .map(|(u, _)| u)
+            .unwrap_or(user_pass);
         Some(format!("postgres://{}:***@{}", user, host_db))
     } else {
         None

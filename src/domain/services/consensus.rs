@@ -1,5 +1,5 @@
+use crate::domain::entities::{BlockHeader, BlockIndexEntry};
 use std::collections::HashMap;
-use crate::domain::entities::{BlockIndexEntry, BlockHeader};
 
 pub struct ConsensusService;
 
@@ -10,18 +10,20 @@ impl ConsensusService {
         current_tip: &BlockHeader,
         block_index: &HashMap<String, BlockIndexEntry>,
     ) -> bool {
-        let new_work = block_index.get(&new_block.block_id)
+        let new_work = block_index
+            .get(&new_block.block_id)
             .map(|e| e.cumulative_work)
             .unwrap_or(0);
-            
-        let current_work = block_index.get(&current_tip.block_id)
+
+        let current_work = block_index
+            .get(&current_tip.block_id)
             .map(|e| e.cumulative_work)
             .unwrap_or(0);
 
         if new_work > current_work {
             return true;
         }
-        
+
         // Tie-breaker: deterministic rule (e.g., lower hash or first seen)
         // For simulation, we stick to existing tip on ties to avoid thrashing
         false
@@ -51,15 +53,12 @@ impl ConsensusService {
                 curr_b = entry_b.header.parent_hash.clone();
             }
         }
-        
+
         Some(curr_a)
     }
-    
+
     /// Calculates the cumulative work for a block given its parent's work.
-    pub fn calculate_cumulative_work(
-        header: &BlockHeader,
-        parent_work: u128,
-    ) -> u128 {
+    pub fn calculate_cumulative_work(header: &BlockHeader, parent_work: u128) -> u128 {
         // In a real PoW, this would be parent_work + difficulty
         // For simulation, we can use height or a simple difficulty sum
         parent_work + (header.difficulty as u128)
@@ -84,26 +83,29 @@ impl ConsensusService {
                 curr = &entry.header;
             } else {
                 // If we hit genesis or end of chain before window size, just return current difficulty
-                return parent_header.difficulty; 
+                return parent_header.difficulty;
             }
         }
-        
+
         let start_header = curr;
-        let actual_time_ms = parent_header.timestamp_ms.saturating_sub(start_header.timestamp_ms);
+        let actual_time_ms = parent_header
+            .timestamp_ms
+            .saturating_sub(start_header.timestamp_ms);
         let target_time_ms = target_block_time_ms * (retarget_window as u64);
-        
+
         if actual_time_ms == 0 {
-             return parent_header.difficulty * 4; // Max increase
+            return parent_header.difficulty * 4; // Max increase
         }
 
-        let new_difficulty = (parent_header.difficulty as u128 * target_time_ms as u128) / actual_time_ms as u128;
-        
+        let new_difficulty =
+            (parent_header.difficulty as u128 * target_time_ms as u128) / actual_time_ms as u128;
+
         // Clamp (max 4x change)
         let max_diff = parent_header.difficulty * 4;
         let min_diff = parent_header.difficulty / 4;
-        
+
         let clamped = new_difficulty.max(min_diff as u128).min(max_diff as u128);
-        
+
         clamped.max(1) as u64
     }
 }

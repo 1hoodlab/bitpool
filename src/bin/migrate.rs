@@ -8,9 +8,8 @@ use sea_orm::{Database, DatabaseConnection};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let url = std::env::var("DATABASE_URL").map_err(|_| {
-        "DATABASE_URL is not set. Set it in .env or environment."
-    })?;
+    let url = std::env::var("DATABASE_URL")
+        .map_err(|_| "DATABASE_URL is not set. Set it in .env or environment.")?;
 
     // Debug: print URL with password redacted (confirm .env is loaded and which host/user)
     if let Some(redacted) = redact_url(&url) {
@@ -30,7 +29,10 @@ fn redact_url(url: &str) -> Option<String> {
             .or_else(|| url.strip_prefix("postgresql://"))
             .unwrap_or(url);
         let (user_pass, host_db) = after_scheme.split_once('@')?;
-        let user = user_pass.split_once(':').map(|(u, _)| u).unwrap_or(user_pass);
+        let user = user_pass
+            .split_once(':')
+            .map(|(u, _)| u)
+            .unwrap_or(user_pass);
         Some(format!("postgres://{}:***@{}", user, host_db))
     } else {
         None
@@ -39,7 +41,8 @@ fn redact_url(url: &str) -> Option<String> {
 
 async fn run_migrate(url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let db: DatabaseConnection = Database::connect(url).await?;
-    migration::Migrator::up(&db, None).await
+    migration::Migrator::up(&db, None)
+        .await
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
     println!("Migrations completed.");
     Ok(())

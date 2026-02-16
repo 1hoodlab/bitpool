@@ -80,8 +80,10 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_blocks_parent_id ON blocks(parent_id);")
-            .await?;
+        db.execute_unprepared(
+            "CREATE INDEX IF NOT EXISTS idx_blocks_parent_id ON blocks(parent_id);",
+        )
+        .await?;
         db.execute_unprepared("CREATE INDEX IF NOT EXISTS idx_blocks_height ON blocks(height);")
             .await?;
         db.execute_unprepared(
@@ -104,9 +106,12 @@ impl MigrationTrait for Migration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        db.execute_unprepared("DROP TABLE IF EXISTS event_log;").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS reward_settlements;").await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS blocks;").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS event_log;")
+            .await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS reward_settlements;")
+            .await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS blocks;")
+            .await?;
         db.execute_unprepared("DROP TABLE IF EXISTS nodes;").await?;
         Ok(())
     }

@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait,
+};
 
 use crate::database::entities::{EventLogInsert, EventLogRow};
 use crate::domain::entities::{
@@ -118,7 +120,8 @@ impl EventRepository for SeaOrmEventRepository {
         first_seen_seq_id: i64,
         chain_status: &str,
     ) -> Result<(), DomainRepoError> {
-        let stmt = build_upsert_block_statement(block, cumulative_work, first_seen_seq_id, chain_status);
+        let stmt =
+            build_upsert_block_statement(block, cumulative_work, first_seen_seq_id, chain_status);
 
         self.db
             .execute(stmt)
@@ -141,21 +144,27 @@ impl EventRepository for SeaOrmEventRepository {
             .await
             .map_err(|e| DomainRepoError(format!("begin transaction failed: {e}")))?;
 
-        let block_stmt = build_upsert_block_statement(block, cumulative_work, first_seen_seq_id, chain_status);
+        let block_stmt =
+            build_upsert_block_statement(block, cumulative_work, first_seen_seq_id, chain_status);
         txn.execute(block_stmt)
             .await
             .map_err(|e| DomainRepoError(format!("upsert block in transaction failed: {e}")))?;
 
         for write in reward_writes {
-            let update_stmt = build_update_reward_settlement_statement(&write.reward, write.confirmations);
+            let update_stmt =
+                build_update_reward_settlement_statement(&write.reward, write.confirmations);
             let update_result = txn.execute(update_stmt).await.map_err(|e| {
-                DomainRepoError(format!("update reward settlement in transaction failed: {e}"))
+                DomainRepoError(format!(
+                    "update reward settlement in transaction failed: {e}"
+                ))
             })?;
             if update_result.rows_affected() == 0 {
                 let insert_stmt =
                     build_insert_reward_settlement_statement(&write.reward, write.confirmations);
                 txn.execute(insert_stmt).await.map_err(|e| {
-                    DomainRepoError(format!("insert reward settlement in transaction failed: {e}"))
+                    DomainRepoError(format!(
+                        "insert reward settlement in transaction failed: {e}"
+                    ))
                 })?;
             }
         }
@@ -166,7 +175,9 @@ impl EventRepository for SeaOrmEventRepository {
         Ok(())
     }
 
-    async fn load_chain_state(&self) -> Result<(Vec<BlockIndexEntry>, Option<ChainTip>), DomainRepoError> {
+    async fn load_chain_state(
+        &self,
+    ) -> Result<(Vec<BlockIndexEntry>, Option<ChainTip>), DomainRepoError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             r#"
@@ -426,7 +437,8 @@ fn build_upsert_block_statement(
     let work_i64 = (block.header.difficulty as u128).min(i64::MAX as u128) as i64;
     let nonce_visual = block.header.nonce.to_string();
     let target = block.header.difficulty.to_string();
-    let parent_id = if block.header.parent_hash.is_empty() || block.header.parent_hash == "genesis" {
+    let parent_id = if block.header.parent_hash.is_empty() || block.header.parent_hash == "genesis"
+    {
         None
     } else {
         Some(block.header.parent_hash.clone())

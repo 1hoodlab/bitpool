@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bitpool Realtime Test</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+    .card {
+      background: #111827;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    input, button {
+      background: #0b1220;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    button {
+      cursor: pointer;
+    }
+    button:hover {
+      border-color: #64748b;
+    }
+    .status {
+      font-weight: 600;
+      color: #93c5fd;
+    }
+    pre {
+      margin: 0;
+      background: #020617;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px;
+      overflow: auto;
+      max-height: 300px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .small {
+      opacity: 0.9;
+      font-size: 13px;
+    }
+    .network-stage {
+      position: relative;
+      height: 520px;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      background: radial-gradient(circle at center, #101c34 0%, #060c1c 65%, #020617 100%);
+      overflow: hidden;
+    }
+    .network-links {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .ui-block {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 130px;
+      height: 130px;
+      border-radius: 14px;
+      border: 1px solid #60a5fa;
+      background: linear-gradient(140deg, #10284b, #0b1730);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-weight: 700;
+      color: #bfdbfe;
+      box-shadow: 0 0 28px rgba(59, 130, 246, 0.28);
+    }
+    .node {
+      position: absolute;
+      width: 106px;
+      min-height: 76px;
+      border-radius: 12px;
+      border: 1px solid #475569;
+      background: #0b1324;
+      color: #e2e8f0;
+      display: grid;
+      place-items: center;
+      padding: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+      transition: transform 0.15s ease, border-color 0.2s ease;
+    }
+    .node:hover {
+      transform: scale(1.04);
+      border-color: #93c5fd;
+    }
+    .node.online {
+      border-color: #22c55e;
+      box-shadow: 0 0 18px rgba(34, 197, 94, 0.16);
+    }
+    .node.offline {
+      border-color: #64748b;
+      opacity: 0.6;
+    }
+    .node-id {
+      font-weight: 700;
+      text-align: center;
+      width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .node-sub {
+      margin-top: 4px;
+      color: #93c5fd;
+      font-size: 11px;
+    }
+    .packet {
+      position: absolute;
+      width: 11px;
+      height: 11px;
+      border-radius: 999px;
+      background: #facc15;
+      box-shadow: 0 0 10px rgba(250, 204, 21, 0.9);
+      pointer-events: none;
+      z-index: 30;
+      transform: translate(-50%, -50%);
+    }
+    .packet.ui-packet {
+      background: #60a5fa;
+      box-shadow: 0 0 10px rgba(96, 165, 250, 0.9);
+    }
+    .tooltip {
+      position: absolute;
+      min-width: 220px;
+      max-width: 300px;
+      background: rgba(2, 6, 23, 0.97);
+      border: 1px solid #475569;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.4;
+      pointer-events: none;
+      z-index: 40;
+      display: none;
+      white-space: pre-wrap;
+    }
+    .legend {
+      margin-top: 8px;
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      opacity: 0.9;
+    }
+    .dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      margin-right: 6px;
+    }
+    .dot-yellow { background: #facc15; }
+    .dot-blue { background: #60a5fa; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h2 style="margin-top:0;">Bitpool Realtime Test</h2>
+      <div class="row">
+        <label>Base URL</label>
+        <input id="baseUrl" value="http://127.0.0.1:8080" style="min-width: 280px;" />
+        <label>blocks_limit</label>
+        <input id="blocksLimit" type="number" value="200" min="1" max="1000" style="width: 90px;" />
+        <label>include_rewards</label>
+        <input id="includeRewards" type="checkbox" checked />
+      </div>
+      <div class="row" style="margin-top: 10px;">
+        <button id="btnBootstrap">1) Bootstrap</button>
+        <button id="btnConnect">2) Connect WS</button>
+        <button id="btnDisconnect">Disconnect</button>
+        <button id="btnClearLog">Clear Log</button>
+        <span class="status" id="wsStatus">WS: disconnected</span>
+      </div>
+      <div class="small" style="margin-top: 10px;">
+        lastSeqId: <span id="lastSeqId">0</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Network Realtime View</h3>
+      <div class="network-stage" id="networkStage">
+        <svg class="network-links" id="networkLinks"></svg>
+        <div class="ui-block" id="uiBlock">UI</div>
+        <div class="tooltip" id="nodeTooltip"></div>
+      </div>
+      <div class="legend">
+        <span><span class="dot dot-yellow"></span>Node-to-node message</span>
+        <span><span class="dot dot-blue"></span>Node-to-UI update</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Bootstrap Response</h3>
+      <pre id="bootstrapOutput">No data</pre>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Realtime Events</h3>
+      <pre id="eventsOutput">No events</pre>
+    </div>
+  </div>
+
+  <script>
+    const baseUrlInput = document.getElementById("baseUrl");
+    const blocksLimitInput = document.getElementById("blocksLimit");
+    const includeRewardsInput = document.getElementById("includeRewards");
+    const bootstrapOutput = document.getElementById("bootstrapOutput");
+    const eventsOutput = document.getElementById("eventsOutput");
+    const wsStatus = document.getElementById("wsStatus");
+    const lastSeqIdEl = document.getElementById("lastSeqId");
+    const networkStage = document.getElementById("networkStage");
+    const networkLinks = document.getElementById("networkLinks");
+    const uiBlock = document.getElementById("uiBlock");
+    const nodeTooltip = document.getElementById("nodeTooltip");
+
+    const btnBootstrap = document.getElementById("btnBootstrap");
+    const btnConnect = document.getElementById("btnConnect");
+    const btnDisconnect = document.getElementById("btnDisconnect");
+    const btnClearLog = document.getElementById("btnClearLog");
+
+    let ws = null;
+    let lastSeqId = 0;
+    const nodesById = new Map();
+    const nodeElements = new Map();
+    let bootstrapCache = null;
+
+    function safeNum(value, fallback = 0) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : fallback;
+    }
+
+    function setWsStatus(text, color) {
+      wsStatus.textContent = text;
+      wsStatus.style.color = color;
+    }
+
+    function setLastSeq(seq) {
+      lastSeqId = Number.isFinite(seq) ? seq : lastSeqId;
+      lastSeqIdEl.textContent = String(lastSeqId);
+    }
+
+    function appendEvent(eventObj) {
+      const current = eventsOutput.textContent === "No events" ? "" : eventsOutput.textContent + "\n";
+      eventsOutput.textContent = current + JSON.stringify(eventObj, null, 2);
+      eventsOutput.scrollTop = eventsOutput.scrollHeight;
+    }
+
+    function getStagePointForElement(el) {
+      const stageRect = networkStage.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
+      return {
+        x: rect.left - stageRect.left + rect.width / 2,
+        y: rect.top - stageRect.top + rect.height / 2
+      };
+    }
+
+    function showTooltip(nodeId, x, y) {
+      const stats = nodesById.get(nodeId);
+      if (!stats) {
+        return;
+      }
+      const text = [
+        `node_id: ${nodeId}`,
+        `online: ${stats.is_online ? "true" : "false"}`,
+        `hash_rate: ${safeNum(stats.hash_rate)}`,
+        `tip_height: ${safeNum(stats.tip_height)}`,
+        `tip_block_id: ${stats.tip_block_id || "-"}`,
+        `mempool_size: ${safeNum(stats.mempool_size)}`,
+        `mined_blocks: ${safeNum(stats.mined_blocks)}`,
+        `orphaned_blocks: ${safeNum(stats.orphaned_blocks)}`,
+        `msg_in: ${safeNum(stats.msg_in)}`,
+        `msg_out: ${safeNum(stats.msg_out)}`,
+        `last_event: ${stats.last_event_type || "-"}`
+      ].join("\n");
+      nodeTooltip.textContent = text;
+      nodeTooltip.style.display = "block";
+      nodeTooltip.style.left = `${Math.max(8, Math.min(x + 12, networkStage.clientWidth - 230))}px`;
+      nodeTooltip.style.top = `${Math.max(8, Math.min(y + 12, networkStage.clientHeight - 180))}px`;
+    }
+
+    function hideTooltip() {
+      nodeTooltip.style.display = "none";
+    }
+
+    function drawLinks() {
+      networkLinks.innerHTML = "";
+      const uiCenter = getStagePointForElement(uiBlock);
+      for (const [, nodeEl] of nodeElements) {
+        const nodeCenter = getStagePointForElement(nodeEl);
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("x1", String(nodeCenter.x));
+        line.setAttribute("y1", String(nodeCenter.y));
+        line.setAttribute("x2", String(uiCenter.x));
+        line.setAttribute("y2", String(uiCenter.y));
+        line.setAttribute("stroke", "rgba(100, 116, 139, 0.35)");
+        line.setAttribute("stroke-width", "1");
+        networkLinks.appendChild(line);
+      }
+    }
+
+    function renderNodes() {
+      for (const [, nodeEl] of nodeElements) {
+        nodeEl.remove();
+      }
+      nodeElements.clear();
+      hideTooltip();
+
+      const ids = [...nodesById.keys()].sort((a, b) => a.localeCompare(b));
+      if (ids.length === 0) {
+        drawLinks();
+        return;
+      }
+
+      const width = networkStage.clientWidth;
+      const height = networkStage.clientHeight;
+      const centerX = width / 2;
+      const centerY = height / 2;
+      const radius = Math.max(140, Math.min(width, height) / 2 - 95);
+
+      ids.forEach((nodeId, index) => {
+        const angle = (Math.PI * 2 * index) / ids.length - Math.PI / 2;
+        const x = centerX + radius * Math.cos(angle);
+        const y = centerY + radius * Math.sin(angle);
+        const node = nodesById.get(nodeId);
+        const el = document.createElement("div");
+        el.className = `node ${node.is_online ? "online" : "offline"}`;
+        el.style.left = `${x}px`;
+        el.style.top = `${y}px`;
+        el.style.transform = "translate(-50%, -50%)";
+        el.innerHTML = `
+          <div class="node-id">${nodeId}</div>
+          <div class="node-sub">H:${safeNum(node.tip_height)}</div>
+        `;
+        el.addEventListener("mouseenter", (evt) => showTooltip(nodeId, evt.offsetX + x, evt.offsetY + y));
+        el.addEventListener("mousemove", (evt) => showTooltip(nodeId, evt.offsetX + x, evt.offsetY + y));
+        el.addEventListener("mouseleave", hideTooltip);
+        networkStage.appendChild(el);
+        nodeElements.set(nodeId, el);
+      });
+
+      drawLinks();
+    }
+
+    function mergeNodeSnapshot(nodes) {
+      if (!Array.isArray(nodes)) {
+        return;
+      }
+      for (const node of nodes) {
+        const nodeId = node.node_id;
+        if (!nodeId) {
+          continue;
+        }
+        const prev = nodesById.get(nodeId) || {
+          msg_in: 0,
+          msg_out: 0
+        };
+        nodesById.set(nodeId, {
+          ...prev,
+          node_id: nodeId,
+          is_online: !!node.is_online,
+          hash_rate: safeNum(node.hash_rate),
+          has_relay: !!node.has_relay,
+          tip_block_id: node.tip_block_id || prev.tip_block_id || null,
+          tip_height: safeNum(node.tip_height, prev.tip_height || 0),
+          mempool_size: safeNum(node.mempool_size, prev.mempool_size || 0),
+          mined_blocks: safeNum(node.mined_blocks, prev.mined_blocks || 0),
+          orphaned_blocks: safeNum(node.orphaned_blocks, prev.orphaned_blocks || 0),
+          last_event_type: prev.last_event_type || null
+        });
+      }
+      renderNodes();
+    }
+
+    function animatePacket(fromEl, toEl, cssClass) {
+      if (!fromEl || !toEl) {
+        return;
+      }
+      const from = getStagePointForElement(fromEl);
+      const to = getStagePointForElement(toEl);
+      const packet = document.createElement("div");
+      packet.className = `packet ${cssClass || ""}`;
+      packet.style.left = `${from.x}px`;
+      packet.style.top = `${from.y}px`;
+      networkStage.appendChild(packet);
+
+      const durationMs = 750;
+      requestAnimationFrame(() => {
+        packet.style.transition = `left ${durationMs}ms linear, top ${durationMs}ms linear, opacity 180ms ease`;
+        packet.style.left = `${to.x}px`;
+        packet.style.top = `${to.y}px`;
+      });
+      window.setTimeout(() => {
+        packet.style.opacity = "0";
+      }, durationMs - 120);
+      window.setTimeout(() => {
+        packet.remove();
+      }, durationMs + 160);
+    }
+
+    function animateNodeToNode(fromNodeId, toNodeId) {
+      const fromEl = nodeElements.get(fromNodeId);
+      const toEl = nodeElements.get(toNodeId);
+      animatePacket(fromEl, toEl, "");
+    }
+
+    function animateNodeToUi(nodeId) {
+      const fromEl = nodeElements.get(nodeId);
+      animatePacket(fromEl, uiBlock, "ui-packet");
+    }
+
+    function touchNode(nodeId, updates) {
+      if (!nodeId) {
+        return;
+      }
+      const prev = nodesById.get(nodeId) || {
+        node_id: nodeId,
+        is_online: true,
+        hash_rate: 0,
+        has_relay: false,
+        tip_block_id: null,
+        tip_height: 0,
+        mempool_size: 0,
+        mined_blocks: 0,
+        orphaned_blocks: 0,
+        msg_in: 0,
+        msg_out: 0,
+        last_event_type: null
+      };
+      nodesById.set(nodeId, { ...prev, ...updates });
+    }
+
+    function applyRealtimeEvent(evt) {
+      if (!evt || typeof evt !== "object") {
+        return;
+      }
+      const eventType = String(evt.event_type || "");
+      const payload = evt.payload && typeof evt.payload === "object" ? evt.payload : {};
+
+      if (eventType === "net.deliver.v1" || eventType === "net.message.delivered.v1") {
+        const from = payload.from;
+        const to = payload.to;
+        if (from) {
+          const curr = nodesById.get(from);
+          touchNode(from, { msg_out: safeNum(curr ? curr.msg_out : 0) + 1, last_event_type: eventType });
+        }
+        if (to) {
+          const curr = nodesById.get(to);
+          touchNode(to, { msg_in: safeNum(curr ? curr.msg_in : 0) + 1, last_event_type: eventType });
+        }
+        if (from && to) {
+          animateNodeToNode(from, to);
+        }
+      } else if (eventType === "pow.block_found.v1") {
+        const miner = payload.miner_node_id;
+        if (miner) {
+          const curr = nodesById.get(miner);
+          touchNode(miner, {
+            mined_blocks: safeNum(curr ? curr.mined_blocks : 0) + 1,
+            tip_height: safeNum(payload.height_candidate, curr ? curr.tip_height : 0),
+            tip_block_id: payload.block_id || (curr ? curr.tip_block_id : null),
+            last_event_type: eventType
+          });
+          animateNodeToUi(miner);
+        }
+      } else if (eventType === "node.tip_updated.v1" || eventType === "node.tip.updated.v1") {
+        const nodeId = payload.node || payload.node_id;
+        if (nodeId) {
+          touchNode(nodeId, {
+            tip_height: safeNum(payload.height),
+            tip_block_id: payload.block_id || null,
+            last_event_type: eventType
+          });
+          animateNodeToUi(nodeId);
+        }
+      } else if (eventType === "node.config_upserted.v1") {
+        const nodeId = payload.node_id;
+        if (nodeId) {
+          touchNode(nodeId, {
+            hash_rate: safeNum(payload.hash_rate),
+            is_online: !!payload.is_online,
+            has_relay: !!payload.has_relay,
+            last_event_type: eventType
+          });
+          animateNodeToUi(nodeId);
+        }
+      } else if (eventType === "reward.matured.v1") {
+        const miner = payload.miner_id;
+        if (miner) {
+          touchNode(miner, { last_event_type: eventType });
+          animateNodeToUi(miner);
+        }
+      } else if (eventType === "chain.reorg.v1") {
+        for (const [nodeId, node] of nodesById.entries()) {
+          touchNode(nodeId, {
+            orphaned_blocks: safeNum(node.orphaned_blocks) + 1,
+            last_event_type: eventType
+          });
+        }
+      }
+
+      renderNodes();
+    }
+
+    function buildWsUrl(baseUrl, sinceSeqId) {
+      const asHttp = new URL(baseUrl);
+      asHttp.protocol = asHttp.protocol === "https:" ? "wss:" : "ws:";
+      asHttp.pathname = "/realtime/ws";
+      asHttp.search = `since_seq_id=${encodeURIComponent(sinceSeqId)}`;
+      return asHttp.toString();
+    }
+
+    async function doBootstrap() {
+      const baseUrl = baseUrlInput.value.trim();
+      const blocksLimit = Number(blocksLimitInput.value || "200");
+      const includeRewards = includeRewardsInput.checked;
+      const url = new URL("/realtime/bootstrap", baseUrl);
+      url.searchParams.set("blocks_limit", String(blocksLimit));
+      url.searchParams.set("include_rewards", String(includeRewards));
+
+      try {
+        const res = await fetch(url.toString());
+        const data = await res.json();
+        bootstrapOutput.textContent = JSON.stringify(data, null, 2);
+        if (!res.ok) {
+          appendEvent({ type: "bootstrap_error", status: res.status, data });
+          return;
+        }
+        if (typeof data.current_seq_id === "number") {
+          setLastSeq(data.current_seq_id);
+        }
+        bootstrapCache = data;
+        mergeNodeSnapshot(data.nodes);
+      } catch (err) {
+        appendEvent({ type: "bootstrap_exception", message: String(err) });
+      }
+    }
+
+    function connectWs() {
+      const baseUrl = baseUrlInput.value.trim();
+      const wsUrl = buildWsUrl(baseUrl, lastSeqId);
+      if (ws) {
+        ws.close();
+      }
+      ws = new WebSocket(wsUrl);
+      setWsStatus("WS: connecting...", "#fde68a");
+
+      ws.onopen = () => {
+        setWsStatus("WS: connected", "#86efac");
+        appendEvent({ type: "ws_open", url: wsUrl });
+      };
+
+      ws.onmessage = (message) => {
+        try {
+          const payload = JSON.parse(message.data);
+          appendEvent(payload);
+          if (typeof payload.seq_id === "number") {
+            setLastSeq(payload.seq_id);
+          }
+          if (payload && payload.event_type) {
+            applyRealtimeEvent(payload);
+          }
+        } catch {
+          appendEvent({ type: "raw_message", data: message.data });
+        }
+      };
+
+      ws.onclose = (evt) => {
+        setWsStatus(`WS: disconnected (${evt.code})`, "#fca5a5");
+        appendEvent({ type: "ws_close", code: evt.code, reason: evt.reason });
+      };
+
+      ws.onerror = () => {
+        setWsStatus("WS: error", "#fca5a5");
+        appendEvent({ type: "ws_error" });
+      };
+    }
+
+    function disconnectWs() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      setWsStatus("WS: disconnected", "#93c5fd");
+    }
+
+    btnBootstrap.addEventListener("click", doBootstrap);
+    btnConnect.addEventListener("click", connectWs);
+    btnDisconnect.addEventListener("click", disconnectWs);
+    btnClearLog.addEventListener("click", () => {
+      eventsOutput.textContent = "No events";
+    });
+
+    window.addEventListener("resize", renderNodes);
+
+    // Seed an initial state to make UI visible before first bootstrap.
+    mergeNodeSnapshot([
+      { node_id: "node-1", is_online: true, hash_rate: 0, has_relay: false, tip_height: 0, tip_block_id: null, mempool_size: 0, mined_blocks: 0, orphaned_blocks: 0 },
+      { node_id: "node-2", is_online: true, hash_rate: 0, has_relay: false, tip_height: 0, tip_block_id: null, mempool_size: 0, mined_blocks: 0, orphaned_blocks: 0 },
+      { node_id: "node-3", is_online: true, hash_rate: 0, has_relay: false, tip_height: 0, tip_block_id: null, mempool_size: 0, mined_blocks: 0, orphaned_blocks: 0 }
+    ]);
+  </script>
+</body>
+</html>

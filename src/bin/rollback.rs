@@ -21,7 +21,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .map(|s| s.parse::<u32>())
         .transpose()
-        .map_err(|_| "Invalid steps. Use a positive integer, e.g. `cargo run --bin rollback -- 2`")?;
+        .map_err(|_| {
+            "Invalid steps. Use a positive integer, e.g. `cargo run --bin rollback -- 2`"
+        })?;
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(run_rollback(url.trim(), steps))?;
@@ -36,7 +38,10 @@ fn redact_url(url: &str) -> Option<String> {
             .or_else(|| url.strip_prefix("postgresql://"))
             .unwrap_or(url);
         let (user_pass, host_db) = after_scheme.split_once('@')?;
-        let user = user_pass.split_once(':').map(|(u, _)| u).unwrap_or(user_pass);
+        let user = user_pass
+            .split_once(':')
+            .map(|(u, _)| u)
+            .unwrap_or(user_pass);
         Some(format!("postgres://{}:***@{}", user, host_db))
     } else {
         None

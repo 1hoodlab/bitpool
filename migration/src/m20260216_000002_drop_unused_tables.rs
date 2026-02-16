@@ -9,10 +9,12 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
         db.execute_unprepared("DROP TABLE IF EXISTS block_transactions;")
             .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS snapshots;").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS snapshots;")
+            .await?;
         db.execute_unprepared("DROP TABLE IF EXISTS difficulty_states;")
             .await?;
-        db.execute_unprepared("DROP TABLE IF EXISTS transactions;").await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS transactions;")
+            .await?;
         Ok(())
     }
 

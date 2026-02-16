@@ -24,7 +24,9 @@ pub trait EventRepository: Send + Sync {
         Ok(())
     }
 
-    async fn load_chain_state(&self) -> Result<(Vec<BlockIndexEntry>, Option<ChainTip>), DomainRepoError> {
+    async fn load_chain_state(
+        &self,
+    ) -> Result<(Vec<BlockIndexEntry>, Option<ChainTip>), DomainRepoError> {
         Ok((Vec::new(), None))
     }
 
