@@ -17,6 +17,8 @@ use crate::domain::repositories::{DomainRepoError, EventRepository, RewardSettle
 use crate::domain::services::consensus::ConsensusService;
 use crate::helper::deterministic_rng::{hash_str64, splitmix64, xorshift64};
 
+const REWARD_MATURITY_CONFIRMATIONS: i64 = 10;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineStatus {
     pub running: bool,
@@ -487,10 +489,6 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         self.initialize_genesis();
 
         let (entries, persisted_tip) = self.repo.load_chain_state().await?;
-        if entries.is_empty() {
-            return Ok(());
-        }
-
         for entry in entries {
             self.block_index
                 .insert(entry.header.block_id.clone(), entry);
@@ -513,6 +511,13 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 tip.height
             );
         }
+
+        let rewards = self.repo.load_reward_settlements().await?;
+        for reward in rewards {
+            self.rewards.insert(reward.id.clone(), reward);
+        }
+        self.reconcile_rewards_after_bootstrap();
+        self.persist_all_reward_settlements().await?;
 
         Ok(())
     }
@@ -749,37 +754,39 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         };
         self.rewards.insert(reward_id, reward);
 
-        // 3. Check Maturity (e.g., 100 blocks)
-        let maturity_window = 100;
-        if block.header.height > maturity_window {
-            let mature_height = block.header.height - maturity_window;
-            
-            // Collect matured rewards
-            let mut matured = Vec::new();
-            for reward in self.rewards.values_mut() {
-                 if let Some(entry) = self.block_index.get(&reward.block_hash) {
-                     if entry.header.height == mature_height && entry.status == BlockStatus::Active && reward.status == RewardStatus::Immature {
-                         reward.status = RewardStatus::Confirmed;
-                         reward.matured_at_height = Some(block.header.height);
-                         reward.settled_at_ms = Some(self.sim_time_ms);
-                         matured.push(reward.clone());
-                     }
-                 }
+        // 3. Check Maturity (after configured confirmations)
+        let mature_reward_ids = self
+            .rewards
+            .values()
+            .filter(|reward| reward.status == RewardStatus::Immature)
+            .filter(|reward| {
+                self.reward_confirmations(&reward.block_hash) >= REWARD_MATURITY_CONFIRMATIONS as i32
+            })
+            .map(|reward| reward.id.clone())
+            .collect::<Vec<_>>();
+        let mut matured = Vec::new();
+        for reward_id in mature_reward_ids {
+            if let Some(reward) = self.rewards.get_mut(&reward_id) {
+                reward.status = RewardStatus::Confirmed;
+                reward.matured_at_height = Some(block.header.height);
+                reward.settled_at_ms = Some(self.sim_time_ms);
+                matured.push(reward.clone());
             }
-            
-            // Emit events after dropping mutable borrow on rewards
-            for reward in matured {
-                 self.emit_event(
-                    "reward.matured.v1",
-                    json!({
-                        "reward_id": reward.id,
-                        "miner_id": reward.miner_id,
-                        "amount_sats": reward.amount_sats,
-                        "block_height": block.header.height,
-                    }),
-                    true
-                 ).await?;
-            }
+        }
+
+        // Emit events after dropping mutable borrow on rewards
+        for reward in matured {
+            self.emit_event(
+                "reward.matured.v1",
+                json!({
+                    "reward_id": reward.id,
+                    "miner_id": reward.miner_id,
+                    "amount_sats": reward.amount_sats,
+                    "block_height": block.header.height,
+                }),
+                true,
+            )
+            .await?;
         }
 
         self.persist_block_and_all_reward_settlements(block, "active")
@@ -842,6 +849,56 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 reward,
             })
             .collect()
+    }
+
+    fn reconcile_rewards_after_bootstrap(&mut self) {
+        let tip_height = self.canonical_tip_height();
+        let reward_ids = self.rewards.keys().cloned().collect::<Vec<_>>();
+        for reward_id in reward_ids {
+            let Some(block_hash) = self.rewards.get(&reward_id).map(|r| r.block_hash.clone()) else {
+                continue;
+            };
+            let Some(entry) = self.block_index.get(&block_hash) else {
+                continue;
+            };
+            let entry_height = entry.header.height;
+            let is_active = matches!(entry.status, BlockStatus::Active);
+
+            let Some(reward) = self.rewards.get_mut(&reward_id) else {
+                continue;
+            };
+
+            if !is_active {
+                if reward.status != RewardStatus::Orphaned {
+                    reward.status = RewardStatus::Orphaned;
+                }
+                continue;
+            }
+
+            let confirmations = tip_height
+                .saturating_sub(entry_height)
+                .saturating_add(1)
+                .max(0) as i32;
+            if reward.status == RewardStatus::Immature
+                && confirmations >= REWARD_MATURITY_CONFIRMATIONS as i32
+            {
+                reward.status = RewardStatus::Confirmed;
+                reward.matured_at_height = Some(tip_height);
+                if reward.settled_at_ms.is_none() {
+                    reward.settled_at_ms = Some(self.sim_time_ms);
+                }
+            }
+        }
+    }
+
+    async fn persist_all_reward_settlements(&self) -> Result<(), DomainRepoError> {
+        let reward_writes = self.build_reward_settlement_writes();
+        for write in reward_writes {
+            self.repo
+                .upsert_reward_settlement(&write.reward, write.confirmations)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn persist_block_and_all_reward_settlements(

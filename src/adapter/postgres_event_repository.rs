@@ -285,6 +285,71 @@ impl EventRepository for SeaOrmEventRepository {
         Ok((entries, tip))
     }
 
+    async fn load_reward_settlements(&self) -> Result<Vec<Reward>, DomainRepoError> {
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            r#"
+            SELECT
+                rs.block_id,
+                rs.miner_node_id,
+                rs.state,
+                rs.amount_sats,
+                rs.settled_at_ms,
+                b.found_time_ms
+            FROM reward_settlements rs
+            LEFT JOIN blocks b ON b.block_id = rs.block_id
+            ORDER BY rs.id ASC
+            "#
+            .to_string(),
+        );
+        let rows = self
+            .db
+            .query_all(stmt)
+            .await
+            .map_err(|e| DomainRepoError(format!("load reward settlements failed: {e}")))?;
+
+        let mut rewards = Vec::with_capacity(rows.len());
+        for row in rows {
+            let block_hash: String = row
+                .try_get("", "block_id")
+                .map_err(|e| DomainRepoError(format!("parse reward block_id failed: {e}")))?;
+            let miner_id: String = row
+                .try_get("", "miner_node_id")
+                .map_err(|e| DomainRepoError(format!("parse reward miner_node_id failed: {e}")))?;
+            let state_raw: String = row
+                .try_get("", "state")
+                .map_err(|e| DomainRepoError(format!("parse reward state failed: {e}")))?;
+            let amount_sats: i64 = row
+                .try_get("", "amount_sats")
+                .map_err(|e| DomainRepoError(format!("parse reward amount_sats failed: {e}")))?;
+            let settled_at_ms: Option<i64> = row
+                .try_get("", "settled_at_ms")
+                .map_err(|e| DomainRepoError(format!("parse reward settled_at_ms failed: {e}")))?;
+            let created_at_ms: Option<i64> = row
+                .try_get("", "found_time_ms")
+                .map_err(|e| DomainRepoError(format!("parse reward found_time_ms failed: {e}")))?;
+
+            let status = match state_raw.as_str() {
+                "confirmed" => RewardStatus::Confirmed,
+                "orphaned" => RewardStatus::Orphaned,
+                "spent" => RewardStatus::Spent,
+                _ => RewardStatus::Immature,
+            };
+
+            rewards.push(Reward {
+                id: format!("reward-{block_hash}"),
+                block_hash,
+                miner_id,
+                amount_sats,
+                status,
+                created_at_ms: created_at_ms.unwrap_or_default(),
+                matured_at_height: None,
+                settled_at_ms,
+            });
+        }
+        Ok(rewards)
+    }
+
     async fn upsert_reward_settlement(
         &self,
         reward: &Reward,

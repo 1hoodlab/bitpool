@@ -28,6 +28,10 @@ pub trait EventRepository: Send + Sync {
         Ok((Vec::new(), None))
     }
 
+    async fn load_reward_settlements(&self) -> Result<Vec<Reward>, DomainRepoError> {
+        Ok(Vec::new())
+    }
+
     async fn upsert_reward_settlement(
         &self,
         _reward: &Reward,
