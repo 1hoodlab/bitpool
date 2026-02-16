@@ -423,7 +423,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 "msg_id": delivery.msg_id,
                 "payload": delivery.payload,
             }),
-            true,
+            false,
         )
         .await?;
         self.handle_delivery(&delivery).await
@@ -569,7 +569,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 "is_online": node.is_online,
                 "has_relay": node.has_relay,
             }),
-            true,
+            false,
         )
         .await?;
 
@@ -582,7 +582,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                     "reason": "runtime_node_upsert",
                     "online_hash_rate": self.total_online_hash_rate(),
                 }),
-                true,
+                false,
             )
             .await?;
         }
@@ -634,7 +634,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 "total_weight": template.total_weight,
                 "total_fees_sats": template.total_fees_sats,
             }),
-            true,
+            false,
         )
         .await?;
 
@@ -1148,7 +1148,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                                 "from": delivery.from,
                                 "tx_id": tx_id,
                             }),
-                            true,
+                            false,
                         )
                         .await?;
                     }
@@ -1223,7 +1223,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                         "block_id": block_id,
                         "height": height,
                     }),
-                    true,
+                    false,
                 )
                 .await?;
                 self.update_tip(
@@ -1256,7 +1256,7 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                 "block_id": next_tip.block_id,
                 "height": next_tip.height,
             }),
-            true,
+            false,
         )
         .await
     }
