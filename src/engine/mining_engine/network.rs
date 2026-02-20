@@ -81,6 +81,14 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         to: &str,
         kind: &MessageKind,
     ) -> u64 {
+        if let Some(ms) = self
+            .peer_latencies_ms
+            .get(&(from.to_string(), to.to_string()))
+            .copied()
+        {
+            return ms.max(1);
+        }
+
         let counter = self.schedule_counter.saturating_add(1);
         let seed = stable_seed_for_command(
             self.base_seed,

@@ -38,33 +38,108 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
     }
 
     pub(super) async fn try_mine_block(&mut self) -> Result<(), DomainRepoError> {
-        let Some(template) = self.build_block_template() else {
+        let mut node_ids = self
+            .nodes
+            .values()
+            .filter(|n| n.is_online && n.hash_rate > 0)
+            .map(|n| n.node_id.clone())
+            .collect::<Vec<_>>();
+        node_ids.sort();
+        if node_ids.is_empty() {
             return Ok(());
-        };
-        self.emit_event(
-            "pow.template_built.v1",
-            json!({
-                "sim_time_ms": self.sim_time_ms,
-                "tx_ids": template.tx_ids,
-                "total_weight": template.total_weight,
-                "total_fees_sats": template.total_fees_sats,
-            }),
-            false,
-        )
-        .await?;
+        }
 
-        // Get parent from active tip.
-        let (parent_hash, parent_height) = match &self.active_tip {
-            Some(tip) => (tip.block_id.clone(), tip.height),
-            None => ("genesis".to_string(), 0),
-        };
-        let parent_header = self
-            .block_index
-            .get(&parent_hash)
-            .map(|e| &e.header)
-            .ok_or(DomainRepoError("parent header not found".to_string()))?;
+        for node_id in node_ids {
+            let template = self.build_block_template().unwrap_or(BlockTemplate {
+                tx_ids: Vec::new(),
+                total_weight: 0,
+                total_fees_sats: 0,
+            });
+            self.emit_event(
+                "pow.template_built.v1",
+                json!({
+                    "sim_time_ms": self.sim_time_ms,
+                    "miner_node_id": node_id,
+                    "tx_ids": template.tx_ids,
+                    "total_weight": template.total_weight,
+                    "total_fees_sats": template.total_fees_sats,
+                }),
+                false,
+            )
+            .await?;
 
-        // Calculate next difficulty using the current active chain.
+            let Some((block, target, hit)) = self.mine_block_for_node(&node_id, &template) else {
+                continue;
+            };
+
+            let block_id = block.header.block_id.clone();
+            let block_height = block.header.height;
+            let parent_hash = block.header.parent_hash.clone();
+            let winner = block.header.miner_node_id.clone();
+            let block_tx_ids = block.tx_ids.clone();
+
+            // Process locally first
+            self.process_block(block.clone()).await?;
+            for tx_id in &block.tx_ids {
+                self.mempool.remove(tx_id);
+            }
+
+            self.emit_event(
+                "pow.block_found.v1",
+                json!({
+                    "block_id": block_id,
+                    "miner_node_id": winner,
+                    "height_candidate": block_height,
+                "template_tx_ids": block_tx_ids,
+                    "sim_time_ms": self.sim_time_ms,
+                    "target": target,
+                    "winning_hash": hit.hash,
+                    "hit_trial_offset": hit.trial_offset,
+                }),
+                true,
+            )
+            .await?;
+
+            self.update_tip(
+                &winner,
+                NodeTip {
+                    block_id: block.header.block_id.clone(),
+                    height: block_height,
+                },
+            )
+            .await?;
+
+            self.broadcast_to_online_nodes(
+                &winner,
+                MessageKind::Block,
+                json!({
+                    "block_id": block.header.block_id,
+                    "height": block_height,
+                    "miner_node_id": winner,
+                    "parent_hash": parent_hash,
+                    "tx_ids": block.tx_ids,
+                    "nonce": hit.nonce,
+                    "difficulty": block.header.difficulty,
+                }),
+            );
+        }
+        Ok(())
+    }
+
+    fn mine_block_for_node(
+        &mut self,
+        node_id: &str,
+        template: &BlockTemplate,
+    ) -> Option<(Block, u64, MiningHit)> {
+        // Mine against each node's local tip, not global active tip.
+        let (parent_hash, parent_height) = self
+            .node_tips
+            .get(node_id)
+            .map(|tip| (tip.block_id.clone(), tip.height))
+            .or_else(|| self.active_tip.as_ref().map(|tip| (tip.block_id.clone(), tip.height)))
+            .unwrap_or_else(|| ("genesis".to_string(), 0));
+        let parent_header = self.block_index.get(&parent_hash).map(|e| &e.header)?;
+
         let block_height = parent_height + 1;
         let difficulty = ConsensusService::calculate_next_difficulty(
             parent_header,
@@ -73,80 +148,25 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             10,
         );
         let target = self.current_mining_target(difficulty);
+        let hit = self.find_mining_hit_for_node(node_id, &parent_hash, target)?;
 
-        let Some(hit) = self.find_mining_hit(&parent_hash, target) else {
-            return Ok(());
-        };
-
-        let winner = hit.node_id;
-        let block_id = format!(
-            "blk-{}-{}",
-            block_height,
-            self.current_seq_id.saturating_add(1)
-        );
+        let block_id = format!("blk-{}-{}-{}", block_height, node_id, hit.nonce);
         let header = BlockHeader {
-            block_id: block_id.clone(),
+            block_id,
             height: block_height,
-            parent_hash: parent_hash.clone(),
-            miner_node_id: winner.clone(),
+            parent_hash,
+            miner_node_id: node_id.to_string(),
             timestamp_ms: self.sim_time_ms,
             difficulty,
             nonce: hit.nonce,
             total_weight: template.total_weight,
             total_fees_sats: template.total_fees_sats,
         };
-
         let block = Block {
-            header: header.clone(),
+            header,
             tx_ids: template.tx_ids.clone(),
         };
-
-        // Process locally first
-        self.process_block(block.clone()).await?;
-
-        for tx_id in &template.tx_ids {
-            self.mempool.remove(tx_id);
-        }
-
-        self.emit_event(
-            "pow.block_found.v1",
-            json!({
-                "block_id": block_id,
-                "miner_node_id": winner,
-                "height_candidate": block_height,
-                "template_tx_ids": template.tx_ids,
-                "sim_time_ms": self.sim_time_ms,
-                "target": target,
-                "winning_hash": hit.hash,
-                "hit_trial_offset": hit.trial_offset,
-            }),
-            true,
-        )
-        .await?;
-
-        self.update_tip(
-            &winner,
-            NodeTip {
-                block_id: block_id.clone(),
-                height: block_height,
-            },
-        )
-        .await?;
-
-        self.broadcast_to_online_nodes(
-            &winner,
-            MessageKind::Block,
-            json!({
-                "block_id": block_id,
-                "height": block_height,
-                "miner_node_id": winner,
-                "parent_hash": parent_hash,
-                "tx_ids": template.tx_ids,
-                "nonce": hit.nonce,
-                "difficulty": difficulty,
-            }),
-        );
-        Ok(())
+        Some((block, target, hit))
     }
 
     pub(super) fn build_spawned_tx(&self, tx_counter: u64) -> MempoolTx {
@@ -211,64 +231,53 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
         })
     }
 
-    pub(super) fn find_mining_hit(&mut self, parent_hash: &str, target: u64) -> Option<MiningHit> {
-        let mut node_ids = self
+    fn find_mining_hit_for_node(
+        &mut self,
+        node_id: &str,
+        parent_hash: &str,
+        target: u64,
+    ) -> Option<MiningHit> {
+        let hash_rate = self
             .nodes
-            .values()
-            .filter(|n| n.is_online && n.hash_rate > 0)
-            .map(|n| n.node_id.clone())
-            .collect::<Vec<_>>();
-        node_ids.sort();
-
-        let mut best_hit: Option<MiningHit> = None;
-        for node_id in node_ids {
-            let hash_rate = self
-                .nodes
-                .get(&node_id)
-                .map(|n| n.hash_rate)
-                .unwrap_or_default();
-            let trials = self.trials_for_tick(hash_rate);
-            if trials == 0 {
+            .get(node_id)
+            .map(|n| n.hash_rate)
+            .unwrap_or_default();
+        let trials = self.trials_for_tick(hash_rate);
+        if trials == 0 {
+            return None;
+        }
+        let mut nonce_counter = self
+            .mining_state
+            .get(node_id)
+            .map(|s| s.nonce_counter)
+            .unwrap_or(0);
+        let mut best: Option<MiningHit> = None;
+        for local_offset in 0..trials {
+            let nonce = nonce_counter;
+            nonce_counter = nonce_counter.saturating_add(1);
+            let hash = self.mini_pow_hash(node_id, parent_hash, nonce, local_offset);
+            if hash >= target {
                 continue;
             }
-
-            let mut nonce_counter = self
-                .mining_state
-                .get(&node_id)
-                .map(|s| s.nonce_counter)
-                .unwrap_or(0);
-
-            for local_offset in 0..trials {
-                let nonce = nonce_counter;
-                nonce_counter = nonce_counter.saturating_add(1);
-
-                let hash = self.mini_pow_hash(&node_id, parent_hash, nonce, local_offset);
-                if hash >= target {
-                    continue;
+            let candidate = MiningHit {
+                node_id: node_id.to_string(),
+                nonce,
+                hash,
+                trial_offset: local_offset,
+            };
+            let replace = match &best {
+                None => true,
+                Some(current) => {
+                    (candidate.trial_offset, candidate.nonce) < (current.trial_offset, current.nonce)
                 }
-
-                let candidate = MiningHit {
-                    node_id: node_id.clone(),
-                    nonce,
-                    hash,
-                    trial_offset: local_offset,
-                };
-                let replace = match &best_hit {
-                    None => true,
-                    Some(current) => {
-                        (candidate.trial_offset, &candidate.node_id, candidate.nonce)
-                            < (current.trial_offset, &current.node_id, current.nonce)
-                    }
-                };
-                if replace {
-                    best_hit = Some(candidate);
-                }
+            };
+            if replace {
+                best = Some(candidate);
             }
-
-            self.mining_state
-                .insert(node_id.clone(), NodeMiningState { nonce_counter });
         }
-        best_hit
+        self.mining_state
+            .insert(node_id.to_string(), NodeMiningState { nonce_counter });
+        best
     }
 
     pub(super) fn trials_for_tick(&self, hash_rate: u64) -> u64 {

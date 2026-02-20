@@ -8,7 +8,7 @@ use crate::domain::repositories::{DomainRepoError, EventRepository};
 use crate::helper::deterministic_rng::{hash_str64, splitmix64, xorshift64};
 
 use super::types::NodeTip;
-use super::{DeterministicEngineCore, MinerNodeProfile, NodeMiningState};
+use super::{DeterministicEngineCore, MinerNodeProfile, NodeMiningState, PeerEdgeProfile};
 
 impl<R: EventRepository> DeterministicEngineCore<R> {
     pub(super) fn initialize_network(&mut self) {
@@ -57,6 +57,9 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
                         super::config::EngineCommand::Send(send) => self.schedule_delivery(send),
                         super::config::EngineCommand::UpsertMinerNode(node) => {
                             self.apply_upsert_node(node).await?;
+                        }
+                        super::config::EngineCommand::UpsertPeerEdge(edge) => {
+                            self.apply_upsert_peer_edge(edge).await?;
                         }
                     }
                 }
@@ -224,6 +227,27 @@ impl<R: EventRepository> DeterministicEngineCore<R> {
             .await?;
         }
 
+        Ok(())
+    }
+
+    pub(super) async fn apply_upsert_peer_edge(
+        &mut self,
+        edge: PeerEdgeProfile,
+    ) -> Result<(), DomainRepoError> {
+        self.peer_latencies_ms.insert(
+            (edge.from_node_id.clone(), edge.to_node_id.clone()),
+            edge.latency_ms.max(1),
+        );
+        self.emit_event(
+            "network.peer_edge_upserted.v1",
+            json!({
+                "from_node_id": edge.from_node_id,
+                "to_node_id": edge.to_node_id,
+                "latency_ms": edge.latency_ms.max(1),
+            }),
+            false,
+        )
+        .await?;
         Ok(())
     }
 

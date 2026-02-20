@@ -1,18 +1,27 @@
 mod adapter;
+mod api;
 mod database;
 mod domain;
 mod engine;
 mod helper;
 
 use std::sync::Arc;
+
+use actix_web::{web, App, HttpServer};
 use env_logger::Env;
+
 use adapter::postgres_event_repository::{connect_postgres, SeaOrmEventRepository};
 use adapter::postgres_node_loader::load_miner_nodes_from_db;
+use adapter::postgres_peer_edge_loader::load_peer_latencies_from_db;
+use api::routes::{
+    create_node, get_chain_tip, get_network_stats, get_status, healthz, update_nation_policy,
+    update_nation_status, update_node_hashrate, ApiState,
+};
 use engine::mining_engine::{
     start_deterministic_engine_with_config, MinerNodeProfile, MiningNetworkConfig,
 };
 
-#[tokio::main]
+#[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
     env_logger::Builder::from_env(Env::default().default_filter_or("info,sqlx::query=off")).init();
@@ -23,6 +32,11 @@ async fn main() -> std::io::Result<()> {
             "DATABASE_URL is not set. Set it in .env or environment.",
         )
     })?;
+    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(8080);
     let tick_interval_ms = std::env::var("ENGINE_TICK_INTERVAL_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -88,6 +102,9 @@ async fn main() -> std::io::Result<()> {
             has_relay: node.has_relay,
         })
         .collect::<Vec<_>>();
+    let peer_latencies_ms = load_peer_latencies_from_db(&event_repo.db)
+        .await
+        .map_err(|e| std::io::Error::other(format!("failed to load peer edges from database: {e}")))?;
     let network_config = MiningNetworkConfig {
         enabled: mining_network_enabled,
         tx_spawn_chance_per_thousand,
@@ -96,9 +113,10 @@ async fn main() -> std::io::Result<()> {
         propagation_base_delay_ms,
         propagation_jitter_ms,
         miner_nodes,
+        peer_latencies_ms,
     };
 
-    let _engine = start_deterministic_engine_with_config(
+    let engine = start_deterministic_engine_with_config(
         Arc::clone(&event_repo),
         tick_interval_ms,
         base_seed,
@@ -108,11 +126,25 @@ async fn main() -> std::io::Result<()> {
     .await
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-    log::info!("Blockchain engine started. Press Ctrl+C to stop.");
+    let api_state = web::Data::new(ApiState {
+        engine,
+        db: event_repo.db.clone(),
+    });
+    log::info!("Blockchain engine started. API listening on {}:{}", host, port);
 
-    // Keep the main process running
-    tokio::signal::ctrl_c().await?;
-    log::info!("Shutting down...");
-
-    Ok(())
+    HttpServer::new(move || {
+        App::new()
+            .app_data(api_state.clone())
+            .service(healthz)
+            .service(create_node)
+            .service(update_node_hashrate)
+            .service(update_nation_policy)
+            .service(update_nation_status)
+            .service(get_status)
+            .service(get_chain_tip)
+            .service(get_network_stats)
+    })
+    .bind((host.as_str(), port))?
+    .run()
+    .await
 }

@@ -22,7 +22,7 @@ mod network;
 mod runtime;
 mod seed;
 mod types;
-pub use config::{MinerNodeProfile, MiningNetworkConfig};
+pub use config::{MinerNodeProfile, MiningNetworkConfig, PeerEdgeProfile};
 
 const REWARD_MATURITY_CONFIRMATIONS: i64 = 10;
 
@@ -57,6 +57,7 @@ impl Default for EngineStatus {
     }
 }
 
+#[derive(Clone)]
 pub struct EngineHandle {
     command_tx: mpsc::UnboundedSender<EngineCommand>,
     status: Arc<RwLock<EngineStatus>>,
@@ -72,6 +73,12 @@ impl EngineHandle {
     pub fn upsert_miner_node(&self, node: MinerNodeProfile) -> Result<(), DomainRepoError> {
         self.command_tx
             .send(EngineCommand::UpsertMinerNode(node))
+            .map_err(|e| DomainRepoError(format!("engine inbox closed: {e}")))
+    }
+
+    pub fn upsert_peer_edge(&self, edge: PeerEdgeProfile) -> Result<(), DomainRepoError> {
+        self.command_tx
+            .send(EngineCommand::UpsertPeerEdge(edge))
             .map_err(|e| DomainRepoError(format!("engine inbox closed: {e}")))
     }
 
@@ -104,6 +111,7 @@ pub async fn start_deterministic_engine_with_config<R: EventRepository + 'static
     network_config: MiningNetworkConfig,
 ) -> Result<EngineHandle, DomainRepoError> {
     let initial_seq_id = repo.last_seq_id().await?.unwrap_or(0);
+    let peer_latencies_ms = network_config.peer_latencies_ms.clone();
     let (command_tx, command_rx) = mpsc::unbounded_channel::<EngineCommand>();
     let status = Arc::new(RwLock::new(EngineStatus {
         running: true,
@@ -145,6 +153,7 @@ pub async fn start_deterministic_engine_with_config<R: EventRepository + 'static
         nodes,
         mining_state: HashMap::new(),
         node_tips: HashMap::new(),
+        peer_latencies_ms,
         block_index: HashMap::new(),
         active_tip: None,
         rewards: HashMap::new(),
@@ -182,6 +191,7 @@ struct DeterministicEngineCore<R: EventRepository> {
     nodes: HashMap<String, MinerNodeProfile>,
     mining_state: HashMap<String, NodeMiningState>,
     node_tips: HashMap<String, NodeTip>,
+    peer_latencies_ms: HashMap<(String, String), u64>,
 
     // Phase 3: Consensus & Chain State
     block_index: HashMap<String, BlockIndexEntry>,
@@ -191,6 +201,7 @@ struct DeterministicEngineCore<R: EventRepository> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -443,6 +454,7 @@ mod tests {
                 MinerNodeProfile::new("node-1", 100),
                 MinerNodeProfile::new("node-2", 200),
             ],
+            peer_latencies_ms: HashMap::new(),
         };
         let _engine = start_deterministic_engine_with_config(Arc::clone(&repo), 5, 99, 1024, cfg)
             .await
