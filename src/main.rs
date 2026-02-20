@@ -14,8 +14,8 @@ use adapter::postgres_event_repository::{connect_postgres, SeaOrmEventRepository
 use adapter::postgres_node_loader::load_miner_nodes_from_db;
 use adapter::postgres_peer_edge_loader::load_peer_latencies_from_db;
 use api::routes::{
-    create_node, get_chain_tip, get_network_stats, get_status, healthz, update_nation_policy,
-    update_nation_status, update_node_hashrate, ApiState,
+    create_node, get_chain_tip, get_global_stats, get_nation_stats, get_network_stats, get_status,
+    healthz, update_nation_policy, update_nation_status, update_node_hashrate, ApiState,
 };
 use engine::mining_engine::{
     start_deterministic_engine_with_config, MinerNodeProfile, MiningNetworkConfig,
@@ -143,6 +143,8 @@ async fn main() -> std::io::Result<()> {
             .service(get_status)
             .service(get_chain_tip)
             .service(get_network_stats)
+            .service(get_nation_stats)
+            .service(get_global_stats)
     })
     .bind((host.as_str(), port))?
     .run()

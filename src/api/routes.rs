@@ -6,8 +6,9 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::dto::{
-    ChainTipResponse, CommandAcceptedResponse, CreateNodeRequest, NetworkStatsResponse,
-    UpdateNationPolicyRequest, UpdateNationStatusRequest, UpdateNodeHashrateRequest,
+    ChainTipResponse, CommandAcceptedResponse, CreateNodeRequest, GlobalStatsResponse,
+    NationStatsResponse, NetworkStatsResponse, UpdateNationPolicyRequest,
+    UpdateNationStatusRequest, UpdateNodeHashrateRequest,
 };
 use crate::engine::mining_engine::{MinerNodeProfile, PeerEdgeProfile};
 
@@ -503,5 +504,108 @@ pub async fn get_network_stats(state: web::Data<ApiState>) -> impl Responder {
         pending_inbox: status.pending_inbox,
         pending_deliveries: status.pending_deliveries,
         tick_interval_ms: status.tick_interval_ms,
+    })
+}
+
+#[get("/v1/stats/nations/{nation_id}")]
+pub async fn get_nation_stats(
+    state: web::Data<ApiState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let nation_id = path.into_inner();
+    if nation_id.trim().is_empty() {
+        return HttpResponse::BadRequest().json(json!({ "error": "nation_id is required" }));
+    }
+    let legacy_node_id = format!("nation-{}", nation_id);
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+        SELECT
+            COALESCE(SUM(rs.amount_sats), 0)::BIGINT AS total_mined_sats,
+            COALESCE(SUM(CASE WHEN rs.state = 'confirmed' THEN rs.amount_sats ELSE 0 END), 0)::BIGINT AS confirmed_sats,
+            COALESCE(SUM(CASE WHEN rs.state = 'immature' THEN rs.amount_sats ELSE 0 END), 0)::BIGINT AS immature_sats,
+            COALESCE(SUM(CASE WHEN rs.state = 'orphaned' THEN rs.amount_sats ELSE 0 END), 0)::BIGINT AS orphaned_sats,
+            COALESCE(COUNT(rs.block_id), 0) AS reward_count
+        FROM reward_settlements rs
+        INNER JOIN nodes n ON n.node_id = rs.miner_node_id
+        WHERE n.nation_id = $1 OR n.node_id = $2
+        "#
+        .to_string(),
+        vec![nation_id.clone().into(), legacy_node_id.into()],
+    );
+    let row = match state.db.query_one(stmt).await {
+        Ok(v) => v,
+        Err(err) => {
+            return HttpResponse::InternalServerError().json(json!({ "error": err.to_string() }));
+        }
+    };
+    let Some(row) = row else {
+        return HttpResponse::Ok().json(NationStatsResponse {
+            nation_id,
+            total_mined_sats: 0,
+            confirmed_sats: 0,
+            immature_sats: 0,
+            orphaned_sats: 0,
+            reward_count: 0,
+        });
+    };
+
+    let total_mined_sats: i64 = row.try_get("", "total_mined_sats").unwrap_or(0);
+    let confirmed_sats: i64 = row.try_get("", "confirmed_sats").unwrap_or(0);
+    let immature_sats: i64 = row.try_get("", "immature_sats").unwrap_or(0);
+    let orphaned_sats: i64 = row.try_get("", "orphaned_sats").unwrap_or(0);
+    let reward_count: i64 = row.try_get("", "reward_count").unwrap_or(0);
+
+    HttpResponse::Ok().json(NationStatsResponse {
+        nation_id,
+        total_mined_sats,
+        confirmed_sats,
+        immature_sats,
+        orphaned_sats,
+        reward_count,
+    })
+}
+
+#[get("/v1/stats/global")]
+pub async fn get_global_stats(state: web::Data<ApiState>) -> impl Responder {
+    let stmt = Statement::from_string(
+        DbBackend::Postgres,
+        r#"
+        SELECT
+            COALESCE(SUM(rs.amount_sats), 0)::BIGINT AS total_mined_sats,
+            COALESCE(SUM(CASE WHEN rs.state = 'confirmed' THEN rs.amount_sats ELSE 0 END), 0)::BIGINT AS confirmed_sats,
+            COALESCE(SUM(CASE WHEN rs.state = 'immature' THEN rs.amount_sats ELSE 0 END), 0)::BIGINT AS immature_sats,
+            COALESCE(SUM(CASE WHEN rs.state = 'orphaned' THEN rs.amount_sats ELSE 0 END), 0)::BIGINT AS orphaned_sats,
+            COALESCE(COUNT(rs.block_id), 0) AS reward_count,
+            COALESCE(SUM(CASE WHEN b.chain_status = 'active' THEN 1 ELSE 0 END), 0) AS active_block_count
+        FROM reward_settlements rs
+        LEFT JOIN blocks b ON b.block_id = rs.block_id
+        "#
+        .to_string(),
+    );
+    let row = match state.db.query_one(stmt).await {
+        Ok(v) => v,
+        Err(err) => {
+            return HttpResponse::InternalServerError().json(json!({ "error": err.to_string() }));
+        }
+    };
+    let Some(row) = row else {
+        return HttpResponse::Ok().json(GlobalStatsResponse {
+            total_mined_sats: 0,
+            confirmed_sats: 0,
+            immature_sats: 0,
+            orphaned_sats: 0,
+            reward_count: 0,
+            active_block_count: 0,
+        });
+    };
+
+    HttpResponse::Ok().json(GlobalStatsResponse {
+        total_mined_sats: row.try_get("", "total_mined_sats").unwrap_or(0),
+        confirmed_sats: row.try_get("", "confirmed_sats").unwrap_or(0),
+        immature_sats: row.try_get("", "immature_sats").unwrap_or(0),
+        orphaned_sats: row.try_get("", "orphaned_sats").unwrap_or(0),
+        reward_count: row.try_get("", "reward_count").unwrap_or(0),
+        active_block_count: row.try_get("", "active_block_count").unwrap_or(0),
     })
 }

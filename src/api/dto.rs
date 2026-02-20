@@ -54,3 +54,23 @@ pub struct NetworkStatsResponse {
     pub pending_deliveries: usize,
     pub tick_interval_ms: u64,
 }
+
+#[derive(Debug, Serialize)]
+pub struct NationStatsResponse {
+    pub nation_id: String,
+    pub total_mined_sats: i64,
+    pub confirmed_sats: i64,
+    pub immature_sats: i64,
+    pub orphaned_sats: i64,
+    pub reward_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlobalStatsResponse {
+    pub total_mined_sats: i64,
+    pub confirmed_sats: i64,
+    pub immature_sats: i64,
+    pub orphaned_sats: i64,
+    pub reward_count: i64,
+    pub active_block_count: i64,
+}
