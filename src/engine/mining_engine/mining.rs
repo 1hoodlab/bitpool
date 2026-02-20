@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::domain::entities::{Block, BlockHeader, MessageKind};
 use crate::domain::repositories::{DomainRepoError, EventRepository};
-use crate::domain::services::consensus::ConsensusService;
+use crate::engine::consensus::ConsensusService;
 use crate::helper::deterministic_rng::{hash_str64, splitmix64};
 
 use super::types::{BlockTemplate, MempoolTx, MiningHit, NodeMiningState, NodeTip};

@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::domain::entities::{Block, BlockIndexEntry, BlockStatus, ChainTip, RewardStatus};
 use crate::domain::repositories::{DomainRepoError, EventRepository, RewardSettlementWrite};
-use crate::domain::services::consensus::ConsensusService;
+use crate::engine::consensus::ConsensusService;
 
 use super::types::NodeTip;
 use super::DeterministicEngineCore;
