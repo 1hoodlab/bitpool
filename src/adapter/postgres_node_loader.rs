@@ -1,4 +1,6 @@
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
+
+use crate::database::entities::node_entity;
 
 #[derive(Debug, Clone)]
 pub struct DbMinerNode {
@@ -11,26 +13,19 @@ pub struct DbMinerNode {
 pub async fn load_miner_nodes_from_db(
     db: &DatabaseConnection,
 ) -> Result<Vec<DbMinerNode>, sea_orm::DbErr> {
-    let stmt = Statement::from_string(
-        DbBackend::Postgres,
-        r#"
-        SELECT node_id, hash_rate, is_online, has_relay
-        FROM nodes
-        ORDER BY node_id ASC
-        "#
-        .to_string(),
-    );
-    let rows = db.query_all(stmt).await?;
+    let models = node_entity::Entity::find()
+        .order_by_asc(node_entity::Column::NodeId)
+        .all(db)
+        .await?;
 
-    let mut nodes = Vec::with_capacity(rows.len());
-    for row in rows {
-        let hash_rate_i64: i64 = row.try_get("", "hash_rate")?;
-        nodes.push(DbMinerNode {
-            node_id: row.try_get("", "node_id")?,
-            hash_rate: hash_rate_i64.max(0) as u64,
-            is_online: row.try_get("", "is_online")?,
-            has_relay: row.try_get("", "has_relay")?,
-        });
-    }
+    let nodes = models
+        .into_iter()
+        .map(|m| DbMinerNode {
+            node_id: m.node_id,
+            hash_rate: m.hash_rate.max(0) as u64,
+            is_online: m.is_online,
+            has_relay: m.has_relay,
+        })
+        .collect();
     Ok(nodes)
 }
