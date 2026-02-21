@@ -25,6 +25,16 @@ fn unix_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Parse nation_id from node_id format: nation-{nation_id}-{owner_id} or nation-{nation_id}
+fn parse_nation_id_from_node_id(node_id: &str) -> Option<String> {
+    let parts: Vec<&str> = node_id.splitn(3, '-').collect();
+    if parts.len() >= 2 && parts[0] == "nation" && !parts[1].is_empty() {
+        Some(parts[1].to_string())
+    } else {
+        None
+    }
+}
+
 async fn register_command_once(
     db: &DatabaseConnection,
     command_id: &str,
@@ -53,6 +63,7 @@ async fn register_command_once(
 async fn create_node_row(
     db: &DatabaseConnection,
     node_id: &str,
+    nation_id: Option<&str>,
     hash_rate: u64,
     is_online: bool,
     has_relay: bool,
@@ -72,9 +83,10 @@ async fn create_node_row(
             orphaned_blocks,
             version,
             created_at_ms,
-            updated_at_ms
+            updated_at_ms,
+            nation_id
         )
-        VALUES ($1, FALSE, $2, $3, $4, NULL, 0, 0, 0, $5, $5)
+        VALUES ($1, FALSE, $2, $3, $4, NULL, 0, 0, 0, $5, $5, $6)
         "#
         .to_string(),
         vec![
@@ -83,6 +95,7 @@ async fn create_node_row(
             is_online.into(),
             has_relay.into(),
             now_ms.into(),
+            nation_id.map(|s| s.to_string()).into(),
         ],
     );
     let result = db.execute(stmt).await?;
@@ -205,11 +218,12 @@ pub async fn create_node(
     if body.command_id.trim().is_empty() {
         return HttpResponse::BadRequest().json(json!({ "error": "command_id is required" }));
     }
+    let nation_scope = parse_nation_id_from_node_id(&body.node_id).unwrap_or_else(|| body.node_id.clone());
     let is_new = match register_command_once(
         &state.db,
         &body.command_id,
         "CreateNode",
-        &body.node_id,
+        &nation_scope,
     )
     .await
     {
@@ -230,7 +244,17 @@ pub async fn create_node(
     let now_ms = unix_now_ms();
     let is_online = body.is_online.unwrap_or(true);
     let has_relay = body.has_relay.unwrap_or(false);
-    let created = match create_node_row(&state.db, &node_id, body.hash_rate, is_online, has_relay, now_ms).await
+    let nation_id = parse_nation_id_from_node_id(&node_id);
+    let created = match create_node_row(
+        &state.db,
+        &node_id,
+        nation_id.as_deref(),
+        body.hash_rate,
+        is_online,
+        has_relay,
+        now_ms,
+    )
+    .await
     {
         Ok(v) => v,
         Err(err) => {
@@ -516,7 +540,9 @@ pub async fn get_nation_stats(
     if nation_id.trim().is_empty() {
         return HttpResponse::BadRequest().json(json!({ "error": "nation_id is required" }));
     }
-    let legacy_node_id = format!("nation-{}", nation_id);
+    // Match by nation_id column (preferred) or node_id format: nation-{nation_id} or nation-{nation_id}-{owner_id}
+    let exact_prefix = format!("nation-{}", nation_id);
+    let prefix_with_dash = format!("nation-{}-", nation_id);
     let stmt = Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"
@@ -528,10 +554,14 @@ pub async fn get_nation_stats(
             COALESCE(COUNT(rs.block_id), 0) AS reward_count
         FROM reward_settlements rs
         INNER JOIN nodes n ON n.node_id = rs.miner_node_id
-        WHERE n.nation_id = $1 OR n.node_id = $2
+        WHERE n.nation_id = $1 OR n.node_id = $2 OR n.node_id LIKE $3
         "#
         .to_string(),
-        vec![nation_id.clone().into(), legacy_node_id.into()],
+        vec![
+            nation_id.clone().into(),
+            exact_prefix.clone().into(),
+            format!("{}%", prefix_with_dash).into(),
+        ],
     );
     let row = match state.db.query_one(stmt).await {
         Ok(v) => v,

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateNodeRequest {
+    /// Format: nation-{nation_id}-{owner_id} or nation-{nation_id}
     pub node_id: String,
     pub hash_rate: u64,
     pub is_online: Option<bool>,
